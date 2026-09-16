@@ -4,10 +4,13 @@ A from-scratch clone of the *Screwdom 3D* screw-puzzle game that runs entirely o
 your phone with no account, no server, no purchases and no leagues. Every level
 is open and every power-up is free and unlimited.
 
-- 1000 procedurally generated, deterministic, solvable levels with a smooth
-  difficulty ramp (plates, layers, colours, mystery screws).
+- 1000 procedurally generated, deterministic, solvable levels ramping from
+  9-screw tutorials to 150-screw towers up to 15 plates deep.
+- Levels are built as interlocking towers, so several parts of the board are
+  always workable at once rather than one forced peel order.
 - Six power-ups: Drill, Extra Hole, Magic Box, Repaint, Magnet, Hint.
 - Three.js rendering, WebAudio-synthesized sound, progress saved on-device.
+- Tuned specifically for iPhone 17 Pro Max (440x956 pt at 3x).
 - Ships as a Progressive Web App: open it once, add it to your Home Screen,
   and it works offline like a native app.
 
