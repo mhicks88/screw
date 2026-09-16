@@ -178,11 +178,15 @@ describe('snapshots', () => {
     a.tray[0] = 999;
     a.boxes[0].screws.push(42);
     a.level.panels[0].shape.outline[0].x = 123;
+    a.level.panels[0].position.z = 123;
+    a.level.screws[0].position.x = 123;
     a.screws[0].location = 'gone';
     const b = g.snapshot();
     expect(b.tray[0]).toBe(null);
     expect(b.boxes[0].screws).toEqual([2]);
     expect(b.level.panels[0].shape.outline[0].x).toBe(-2.8);
+    expect(b.level.panels[0].position.z).toBe(0);
+    expect(b.level.screws[0].position.x).not.toBe(123);
     expect(b.screws[0].location).toBe('plate');
     const g2 = Game.fromSnapshot(b);
     expect(g2.snapshot()).toEqual(b);

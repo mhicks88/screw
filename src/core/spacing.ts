@@ -47,7 +47,13 @@ import type { Vec3 } from './types';
 export const SCREW_SPACING = 0.62;
 export const SCREW_EDGE_MARGIN = 0.34;
 export const SCREW_HEAD_R = 0.23;
-export const SCREW_HIT_R = 0.41;
+/**
+ * Tap radius. Half the pitch, so neighbouring hit spheres meet but never
+ * overlap — the property v2's 0.41 had against its 0.82 pitch, kept against
+ * the v3 pitch. (src/render/layout.ts keeps its own copy for the renderer;
+ * they must agree.)
+ */
+export const SCREW_HIT_R = SCREW_SPACING / 2;
 /**
  * Clearance kept between two panels' bodies so they never interpenetrate. It is
  * applied to BOTH panels of a pair, so the real gap between two panels is twice

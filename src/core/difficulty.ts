@@ -93,7 +93,13 @@ export function difficultyFor(level: number): DifficultyParams {
     Math.floor(band.screws[1] / BOX_CAPACITY) * BOX_CAPACITY,
   );
   const shells = Math.round(lerp(band.shells[0], band.shells[1], t));
-  const panels = clamp(Math.round(lerp(band.panels[0], band.panels[1], t)), band.panels[0], band.panels[1]);
+  // Biased towards the top of the band: panels beyond the six skin faces of a
+  // shell become brackets and straps, and those are what keep screws facing
+  // the player from every angle (CONTRACT_V3 §6).
+  const panels = clamp(
+    Math.round(lerp(lerp(band.panels[0], band.panels[1], 0.3), band.panels[1], t)),
+    band.panels[0], band.panels[1],
+  );
   const colors = clamp(Math.round(lerp(band.colors[0], band.colors[1], t)), 3, 8);
 
   if (level <= 3) {

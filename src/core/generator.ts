@@ -5,12 +5,13 @@
  * ~2 s budget of CONTRACT_V3 §7 buys quality, not just a pass). The box queue is
  * recorded from a bot play-through with a lazy colour provider.
  *
- * Every candidate must:
- *   1. have the right shape   — enough screws, >= 2 panels, the right shells (§7)
- *   2. be winnable            — the planning bot wins with a lazily chosen queue
- * and is then ranked by the §7 non-linearity statistics measured over that
- * play-through plus how close it lands to the band's size/shell targets. The
- * best candidate that also survives the "not too forgiving" naive-bot gate wins.
+ * Every candidate must be WINNABLE — the planning bot clears it with a lazily
+ * chosen box queue — and is then judged on two axes: how it plays (the §7
+ * non-linearity statistics measured over that play-through, plus the §6 rule
+ * that some screws are removable and face-on from every viewing direction) and
+ * whether it is the size its band advertises. Candidates are tiered on those
+ * two, play quality first, and the best of the highest non-empty tier that also
+ * survives the "not too forgiving" naive-bot gate wins.
  *
  * Solvability is not left to luck: the assembly is built so that a screw can
  * only ever be blocked by panels in a strictly outer shell (see ./assembly), so

@@ -44,13 +44,15 @@ function cloneLevel(level: LevelDef, queue: ScrewColor[]): LevelDef {
     ...level,
     panels: level.panels.map((p) => ({
       ...p,
+      position: { ...p.position },
+      rotation: { ...p.rotation },
       shape: {
         kind: p.shape.kind,
         outline: p.shape.outline.map((v) => ({ x: v.x, y: v.y })),
         ...(p.shape.holes ? { holes: p.shape.holes.map((h) => h.map((v) => ({ x: v.x, y: v.y }))) } : {}),
       },
     })),
-    screws: level.screws.map((s) => ({ ...s })),
+    screws: level.screws.map((s) => ({ ...s, position: { ...s.position }, axis: { ...s.axis } })),
     boxQueue: [...queue],
     colors: [...level.colors],
   };

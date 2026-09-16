@@ -1,20 +1,24 @@
 /**
  * Assembly geometry: the nested-shell machine of CONTRACT_V3 §7.
  *
- * An assembly is built from the outside in:
+ * A chassis is built out of MOUNTING DIRECTIONS in three families — six skin
+ * faces on a randomly oriented orthogonal triad, eight brackets in the corner
+ * voids between them, twelve straps across the edges. Along each direction sits
+ * a STACK of panels, one per shell, from the skin inwards; the innermost shell
+ * of a deep assembly is a frame of struts across the core instead. Panels carry
+ * screws on both faces, withdrawing along that face's outward normal.
  *
- *   shell 0        the outer skin — big panels seated on the tangent planes of
- *                  a sphere of radius R0, each facing outward
- *   shell 1..S-2   inner shells at smaller radii, covered (partly) by the ones
- *                  outside them
- *   shell S-1      the frame: long thin struts across the core at varied angles
+ *   shell 0        the skin: the big panels the player meets first
+ *   shell 1..S-2   inner shells, each one covered by the shell outside it
+ *   shell S-1      (deep levels) the frame: struts across the core
  *
- * Panel directions come from a Fibonacci lattice on the sphere that is rotated
- * by a random quaternion per shell and jittered per panel, so panels sit on
- * many different faces instead of the six axis-aligned ones — a box of six
- * squares would look like cardboard and would repeat across 1000 levels.
- * Every panel is checked against every other with an OBB separating-axis test,
- * so no two panels ever interpenetrate.
+ * Twenty-six mounting directions means twenty-six screw axes, so there is
+ * something facing the player from any angle — a box of six flat faces would
+ * read as cardboard and would repeat across 1000 levels — and the corner and
+ * edge voids are volume the skin cannot reach, which is where a good part of a
+ * deep level's screws live. Panels are checked against each other with an OBB
+ * separating-axis test so they never interpenetrate, except that brackets and
+ * straps may bed slightly into the joints they are bolted over.
  *
  * THE ONE STRUCTURAL INVARIANT (this is what makes levels solvable by
  * construction, and it is the exact analogue of v2's layer rule):
@@ -32,8 +36,9 @@ import { ASSEMBLY_RADIUS, type PanelDef, type PlateShapeKind, type Quat, type Ve
 import { Rng } from './rng';
 import { distanceToPolygonEdge, pointInShape, polygonAabb } from './geometry';
 import {
-  PanelBvh, addV3, angleBetween, crossV3, dotV3, lengthV3, normalizeV3, panelToAssembly, perpendicularTo, subV3, panelFacePoint, panelMaxRadius, panelNormal, panelObb, obbOverlap,
-  quatFromAxisAngle, quatFromFrame, quatMul, quatRotate, scaleV3, v3, type Obb,
+  PanelBvh, addV3, angleBetween, crossV3, dotV3, lengthV3, normalizeV3, obbOverlap, panelFacePoint,
+  panelMaxRadius, panelNormal, panelObb, panelToAssembly, perpendicularTo, quatFromAxisAngle,
+  quatFromFrame, quatRotate, scaleV3, subV3, v3, type Obb,
 } from './geometry3';
 import { RAY_LENGTH, rayOriginFor } from './blocking';
 import { fittedShape } from './shapes';
@@ -95,9 +100,11 @@ const SEAM_GAP = SCREW_SPACING - 2 * SCREW_EDGE_MARGIN + 0.02;
  * capacity collapses as it shrinks — and on a nested chassis a shell's panels
  * are as big as its offset allows. Spreading six shells over the whole radius
  * therefore throws most of the level away: the inner shells end up holding one
- * screw each. Packed 0.13 apart (v2 stacked its plates 0.12 apart, so this is
- * the same machine density) every shell stays nearly full size, which is what
- * makes a 140-190 screw level fit inside a sphere of radius 3 at all.
+ * screw each. Packed this close (v2 stacked its plates 0.12 apart, so it is the
+ * same machine density) every shell stays nearly full size, which is what makes
+ * a 140-190 screw level fit inside a sphere of radius 3 at all. It has to stay
+ * clear of 2 * PANEL_GAP plus a panel's thickness, or consecutive shells foul
+ * each other and every other shell comes out empty.
  */
 const SHELL_STEP = 0.115;
 /**
@@ -268,7 +275,7 @@ function sphereCap(t: number, aspect: number): number {
  * tightest wall.
  */
 function faceRoom(
-  dirs: readonly Vec3[], offsets: readonly number[], i: number, x: Vec3, y: Vec3, aspect: number, slack: number,
+  dirs: readonly Vec3[], offsets: readonly number[], i: number, x: Vec3, y: Vec3, aspect: number,
   include: (j: number) => boolean = () => true,
 ): number {
   const n = dirs[i];
@@ -285,7 +292,7 @@ function faceRoom(
     // Distance, inside mount i's plane, from its centre to the line where the
     // two panels' planes cross. Panels that stop short of their own crossing
     // line can never meet, whatever radius each of them sits at.
-    const wall = (offsets[j] - ri * c) / sin - FACE_GAP + slack;
+    const wall = (offsets[j] - ri * c) / sin - FACE_GAP;
     if (wall <= 0) return 0;
     const reach = Math.abs(dotV3(u, x)) + aspect * Math.abs(dotV3(u, y));
     if (reach > 1e-6) scale = Math.min(scale, wall / reach);
@@ -428,14 +435,12 @@ export function placePanels(params: DifficultyParams, rng: Rng): PanelDef[] {
       // The frame at the core: struts across it, at strong angles.
       const offsets = mounts.map((m) => (isFrame ? Math.min(base, 0.62) : base * FAMILY_REACH[m.family]));
       const palette = shell * 3;
-      // Each shell gets its share of the panel budget: skin first (it carries
-      // the screws), then as many fittings as there is room for. Which ones
-      // differ per shell, so no two shells are the same box.
-      // There are only six skin mounts, so anything a shell is given beyond six
-      // panels goes to brackets and straps automatically — and those are the
-      // only panels whose faces point anywhere other than the six chassis axes,
+      // Each shell gets its share of the panel budget. There are only six skin
+      // mounts, so anything beyond six goes to brackets and straps — and those
+      // are the only panels whose faces point away from the six chassis axes,
       // which is what keeps something tappable whichever way the assembly is
-      // turned.
+      // turned. Which fittings a shell gets is redrawn per shell, so no two
+      // shells are the same box.
       const quota = Math.max(1, Math.round(perShell));
       const wanted = rng.shuffle(mounts.map((_, k) => k).filter((k) => (
         pass === 'face' ? mounts[k].family === 'face' : mounts[k].family !== 'face'
@@ -484,7 +489,7 @@ export function placePanels(params: DifficultyParams, rng: Rng): PanelDef[] {
            * which uses the panels' real extents.
            */
           const exact = family !== 'face' ? Math.min(FAMILY_CAP[family], sphereCap(t, aspect))
-            : faceRoom(dirs, offsets, i, frame.x, frame.y, aspect, 0, (j) => mounts[j].family === 'face');
+            : faceRoom(dirs, offsets, i, frame.x, frame.y, aspect, (j) => mounts[j].family === 'face');
           if (exact < 0.34) continue;
           const cap = sphereCap(t, aspect);
           const hwMax = Math.min(exact * 1.06, cap);
