@@ -342,19 +342,49 @@ export class Game implements GameApi {
     if (idx >= 0) this.queue.splice(idx, 1);
   }
 
+  /**
+   * Pull the removable screws that match a box on screen right now, "as many as
+   * fit" (see the power-up notes in types.ts).
+   *
+   * The plan is fixed against the CURRENT boxes before anything moves. An
+   * earlier version simply looped until no removable screw matched any box,
+   * which chained: each pull could complete a box, spawn its replacement, and
+   * make a fresh batch of screws matchable. Measured, that cleared 100% of
+   * every level up to ~700 from a single tap — a skip button rather than a
+   * power-up. Capping it at the visible capacity keeps it strong (up to
+   * MAX_ACTIVE_BOXES * BOX_CAPACITY screws at once) without finishing levels.
+   */
   private magnet(): ActionResult {
+    // Remaining capacity per colour across the boxes currently on screen.
+    const budget = new Map<ScrewColor, number>();
+    for (const b of this.boxes) {
+      budget.set(b.color, (budget.get(b.color) ?? 0) + (BOX_CAPACITY - b.screws.length));
+    }
+    // Choose which screws to pull, filling the fullest matching box first so
+    // boxes complete cleanly rather than all ending up part-filled.
+    const planned: Screw[] = [];
+    const ordered = this.screws
+      .map((s, i) => ({ s, i }))
+      .filter(({ s, i }) => s.location === 'plate' && !this.isBlockedIdx(i))
+      .sort((a, z) => (this.findBoxWithRoom(z.s.color)?.screws.length ?? -1)
+                    - (this.findBoxWithRoom(a.s.color)?.screws.length ?? -1));
+    for (const { s } of ordered) {
+      const left = budget.get(s.color) ?? 0;
+      if (left <= 0) continue;
+      budget.set(s.color, left - 1);
+      planned.push(s);
+    }
+    if (planned.length === 0) return { ok: false, reason: 'nothingToDo', events: [] };
+
     const events: GameEvent[] = [];
     let count = 0;
-    while (this.st === 'playing') {
-      let best: Screw | undefined;
-      let bestFill = -1;
-      this.screws.forEach((s, i) => {
-        if (s.location !== 'plate' || this.isBlockedIdx(i)) return;
-        const box = this.findBoxWithRoom(s.color);
-        if (box && box.screws.length > bestFill) { best = s; bestFill = box.screws.length; }
-      });
-      if (!best) break;
-      const r = this.removeScrew(best, true);
+    for (const s of planned) {
+      if (this.st !== 'playing' || s.location !== 'plate') continue;
+      // A replacement box may have arrived in a different colour by now; never
+      // let the magnet push a screw into the tray, where it could lose the game.
+      if (!this.findBoxWithRoom(s.color)) continue;
+      const r = this.removeScrew(s, false);
+      if (!r.ok) continue;
       events.push(...r.events);
       count++;
     }
