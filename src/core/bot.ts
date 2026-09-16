@@ -1,7 +1,9 @@
 /**
  * Bot used to prove levels are winnable (and to gauge difficulty):
- *   1. if a reachable screw matches an active box with room, take it (prefer the
- *      fullest box);
+ *   1. if a reachable screw matches an active box with room, take it — preferring
+ *      the fullest box, and among equals the screw that brings a plate closest to
+ *      dropping (clearing a plate out is what keeps new screws arriving, and it
+ *      is what a human does);
  *   2. otherwise, if the tray has room, park a reachable screw there. The choice
  *      is human-like but greedy: prefer screws whose plate is nearly empty
  *      (dropping it unblocks things), especially when that plate covers screws
@@ -26,6 +28,12 @@ export interface BotResult {
   trayUses: number;
   /** Maximum simultaneous tray occupancy. */
   peakTray: number;
+  /** With `trace`: reachable screw count before each move (CONTRACT_V2 §5). */
+  reachPerStep?: number[];
+  /** With `trace`: number of distinct plates holding a reachable screw. */
+  frontsPerStep?: number[];
+  /** With `trace`: the screw ids tapped, in order (a replayable winning line). */
+  picks?: number[];
 }
 
 export interface BotOptions {
@@ -36,6 +44,8 @@ export interface BotOptions {
    */
   naive?: boolean;
   maxSteps?: number;
+  /** Record the per-step reachable/front counts used by the non-linearity gate. */
+  trace?: boolean;
 }
 
 export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotResult {
@@ -45,6 +55,11 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
   let steps = 0;
   let trayUses = 0;
   let peakTray = 0;
+  const reachPerStep: number[] | undefined = opts.trace ? [] : undefined;
+  const frontsPerStep: number[] | undefined = opts.trace ? [] : undefined;
+  const picks: number[] | undefined = opts.trace ? [] : undefined;
+  const finish = (outcome: BotResult['outcome']): BotResult =>
+    ({ outcome, steps, trayUses, peakTray, ...(opts.trace ? { reachPerStep, frontsPerStep, picks } : {}) });
   const level = game.level;
   const plateById = new Map(level.plates.map((p) => [p.id, p]));
   const coverMap = game.coverageMap();
@@ -52,28 +67,45 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
   while (steps < maxSteps) {
     if (game.getStatus() !== 'playing') break;
     const reachable = game.reachableScrewIds();
-    if (reachable.length === 0) return { outcome: 'stuck', steps, trayUses, peakTray };
+    if (reachable.length === 0) return finish('stuck');
     const screws = game.peekScrews();
     const byId = new Map(screws.map((s) => [s.id, s]));
+    if (reachPerStep && frontsPerStep) {
+      reachPerStep.push(reachable.length);
+      const fronts = new Set<number>();
+      for (const id of reachable) fronts.add(byId.get(id)!.plateId);
+      frontsPerStep.push(fronts.size);
+    }
     const boxes = game.peekBoxes();
     const boxRoom = new Map<ScrewColor, number>();
     for (const b of boxes) if (b.screws.length < BOX_CAPACITY) boxRoom.set(b.color, Math.max(boxRoom.get(b.color) ?? -1, b.screws.length));
 
-    // 1. Matching screw → fullest box.
+    // 1. Matching screw → fullest box, preferring screws that bring a plate
+    //    closer to dropping (that is what keeps new screws arriving, and it is
+    //    what a human does: clear a plate out rather than pick at random).
     let pick = -1;
-    let bestFill = -1;
+    let bestScore = -Infinity;
+    const plateStates = naive ? undefined : new Map(game.peekPlates().map((p) => [p.id, p]));
     for (const id of reachable) {
-      const fill = boxRoom.get(byId.get(id)!.color) ?? -1;
+      const s = byId.get(id)!;
+      const fill = boxRoom.get(s.color) ?? -1;
       if (fill < 0) continue;
       if (naive) { if (pick < 0 || rng.chance(0.5)) pick = id; continue; }
-      if (fill > bestFill || (fill === bestFill && rng.chance(0.5))) { pick = id; bestFill = fill; }
+      const left = plateStates!.get(s.plateId)!.remainingScrews.length;
+      let hiddenActive = 0;
+      for (const cid of coverMap.get(s.plateId) ?? []) {
+        const c = byId.get(cid)!;
+        if (c.location === 'plate' && boxRoom.has(c.color)) hiddenActive++;
+      }
+      const score = fill * 2 + 4 / left + (hiddenActive * 1.5) / left + rng.float(0, 0.8);
+      if (score > bestScore) { bestScore = score; pick = id; }
     }
     if (pick < 0) {
       // 2. Tray.
       const tray = game.peekTray();
       if (!tray.includes(null)) {
         game.tapScrew(reachable[0]); // refused with trayFull → status 'lost'
-        return { outcome: 'lost', steps, trayUses, peakTray };
+        return finish('lost');
       }
       if (naive) {
         pick = rng.pick(reachable);
@@ -106,12 +138,13 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
       trayUses++;
       }
     }
+    picks?.push(pick);
     const r = game.tapScrew(pick);
     steps++;
-    if (!r.ok) return { outcome: game.getStatus() === 'lost' ? 'lost' : 'stuck', steps, trayUses, peakTray };
+    if (!r.ok) return finish(game.getStatus() === 'lost' ? 'lost' : 'stuck');
     const occ = game.peekTray().filter((x) => x !== null).length;
     if (occ > peakTray) peakTray = occ;
   }
   const st = game.getStatus();
-  return { outcome: st === 'won' ? 'won' : st === 'lost' ? 'lost' : 'stuck', steps, trayUses, peakTray };
+  return finish(st === 'won' ? 'won' : st === 'lost' ? 'lost' : 'stuck');
 }

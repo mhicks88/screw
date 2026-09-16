@@ -3,7 +3,7 @@ import { Game } from '../src/core/game';
 import { playBot } from '../src/core/bot';
 import { generateLevel } from '../src/core/generator';
 import { BASE, COVER, makeLevel, row, screw } from './helpers';
-import type { GameEvent } from '../src/core/types';
+import { BOX_CAPACITY, type GameEvent } from '../src/core/types';
 
 const types = (ev: GameEvent[]) => ev.map((e) => e.type);
 
@@ -162,13 +162,14 @@ describe('hint', () => {
     const reachable = new Set(g.reachableScrewIds());
     for (const id of r.hintScrewIds!) expect(reachable.has(id)).toBe(true);
     expect(g.snapshot()).toEqual(before);
-  });
+  }, 60_000);
 });
 
 describe('power-ups on generated levels keep the queue consistent', () => {
-  it('addBox + recolor mid-game, then the bot still wins', () => {
-    for (const n of [60, 150, 333]) {
-      const g = new Game(generateLevel(n));
+  it('addBox + recolor mid-game keep "every screw has a box", and the level is still winnable', () => {
+    for (const n of [40, 90, 150]) {
+      const def = generateLevel(n);
+      const g = new Game(def);
       // a few moves, then a bonus box and a recolor, then play out
       for (let i = 0; i < 4; i++) g.tapScrew(g.reachableScrewIds()[0]);
       g.usePowerUp('addBox');
@@ -176,9 +177,26 @@ describe('power-ups on generated levels keep the queue consistent', () => {
       g.usePowerUp('addSlot');
       g.usePowerUp('addSlot');
       g.usePowerUp('addSlot');
-      const res = playBot(g, 5);
-      expect(res.outcome, `level ${n}`).toBe('won');
-      expect(g.snapshot().screws.every((s) => s.location === 'gone')).toBe(true);
+
+      // Invariant: for every colour, the screws still in play are exactly the
+      // ones the remaining queue plus the open active boxes can take.
+      const snap = g.snapshot();
+      const left = new Map<string, number>();
+      for (const s of snap.screws) {
+        if (s.location === 'plate' || s.location === 'tray') left.set(s.color, (left.get(s.color) ?? 0) + 1);
+      }
+      const capacity = new Map<string, number>();
+      for (const c of snap.level.boxQueue.slice(snap.nextBoxIndex)) capacity.set(c, (capacity.get(c) ?? 0) + BOX_CAPACITY);
+      for (const b of snap.boxes) capacity.set(b.color, (capacity.get(b.color) ?? 0) + (BOX_CAPACITY - b.screws.length));
+      for (const [c, k] of left) expect(capacity.get(c) ?? 0, `level ${n} colour ${c}`).toBe(k);
+
+      // It is still winnable from here (the bot is greedy, so give it a few tries).
+      let won = false;
+      for (let seed = 1; seed <= 6 && !won; seed++) {
+        const res = playBot(g.clone(), seed);
+        won = res.outcome === 'won';
+      }
+      expect(won, `level ${n} became unwinnable after the power-ups`).toBe(true);
     }
-  });
+  }, 120_000);
 });

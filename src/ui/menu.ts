@@ -1,3 +1,4 @@
+import type { ResumeInfo } from '../storage/progress';
 import { h, svg } from './dom';
 import { ICONS } from './icons';
 
@@ -7,14 +8,31 @@ export interface MenuHandlers {
   onSettings(): void;
 }
 
+export interface MenuState {
+  /** Level "Play" would start. */
+  nextLevel: number;
+  completedCount: number;
+  total: number;
+  /** Saved in-progress board, if any — "Play" then resumes it. */
+  resume: ResumeInfo | null;
+}
+
 export interface MenuScreen {
   el: HTMLElement;
-  /** Refresh the "Level N" label and the completion meter. */
-  update(nextLevel: number, completedCount: number, total: number): void;
+  update(state: MenuState): void;
 }
 
 export function createMenu(handlers: MenuHandlers): MenuScreen {
+  const playLabel = h('span', { class: 'lbl' }, 'Play');
   const levelLabel = h('span', { class: 'sub' }, 'Level 1');
+  const resumeBar = h('span', { class: 'resume-bar' }, h('i'));
+  const playBtn = h(
+    'button',
+    { class: 'btn primary big play-btn', onClick: handlers.onPlay },
+    playLabel,
+    levelLabel,
+    resumeBar,
+  );
   const progressText = h('div', null, h('b', null, '0'), ' / 1000 levels completed');
   const progressFill = h('i');
 
@@ -24,19 +42,20 @@ export function createMenu(handlers: MenuHandlers): MenuScreen {
     h(
       'div',
       { class: 'menu-hero' },
-      h('img', { class: 'menu-logo', src: '/icons/icon-192.png', alt: '', draggable: 'false' }),
+      h('img', {
+        class: 'menu-logo',
+        // BASE_URL so a sub-path deploy (GitHub Pages) still finds the icon.
+        src: `${import.meta.env.BASE_URL}icons/icon-192.png`,
+        alt: '',
+        draggable: 'false',
+      }),
       h('h1', { class: 'menu-title' }, 'SCREWDOM', h('small', null, '3D')),
       h('p', { class: 'menu-tagline' }, 'Unscrew. Sort. Drop the plates.'),
     ),
     h(
       'div',
       { class: 'menu-actions' },
-      h(
-        'button',
-        { class: 'btn primary big', onClick: handlers.onPlay },
-        h('span', null, 'Play'),
-        levelLabel,
-      ),
+      playBtn,
       h(
         'div',
         { class: 'menu-row' },
@@ -49,10 +68,17 @@ export function createMenu(handlers: MenuHandlers): MenuScreen {
 
   return {
     el,
-    update(nextLevel, completedCount, total) {
-      levelLabel.textContent = `Level ${nextLevel}`;
-      progressText.replaceChildren(h('b', null, String(completedCount)), ` / ${total} levels completed`);
-      progressFill.style.width = `${total ? (completedCount / total) * 100 : 0}%`;
+    update(state) {
+      const r = state.resume;
+      playBtn.classList.toggle('resuming', !!r);
+      playLabel.textContent = r ? 'Resume' : 'Play';
+      levelLabel.textContent = r
+        ? `Level ${r.level} · ${r.removed} / ${r.total} screws`
+        : `Level ${state.nextLevel}`;
+      const fill = resumeBar.firstElementChild as HTMLElement | null;
+      if (fill) fill.style.width = r && r.total > 0 ? `${Math.min(100, (r.removed / r.total) * 100)}%` : '0%';
+      progressText.replaceChildren(h('b', null, String(state.completedCount)), ` / ${state.total} levels completed`);
+      progressFill.style.width = `${state.total ? (state.completedCount / state.total) * 100 : 0}%`;
     },
   };
 }

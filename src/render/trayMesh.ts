@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { TRAY_DEPTH, TRAY_HEIGHT, TRAY_HOLE_R, TRAY_Y, trayPositionsX, trayWidth } from './layout';
+import { TRAY_DEPTH, TRAY_HEIGHT, TRAY_HOLE_R, TRAY_Y, traySlotSpacing, trayPositionsX, trayWidth } from './layout';
 
 export interface TrayVisual {
   group: THREE.Group;
@@ -31,9 +31,11 @@ function roundedRect(w: number, h: number, r: number): THREE.Shape {
 
 function buildBarGeometry(slotCount: number): THREE.BufferGeometry {
   const shape = roundedRect(trayWidth(slotCount), TRAY_DEPTH, 0.22);
+  // Holes shrink with the pitch so a wide tray keeps metal between the slots.
+  const holeR = Math.min(TRAY_HOLE_R, traySlotSpacing(slotCount) * 0.32);
   for (const x of trayPositionsX(slotCount)) {
     const hole = new THREE.Path();
-    hole.absarc(x, 0, TRAY_HOLE_R, 0, Math.PI * 2, true);
+    hole.absarc(x, 0, holeR, 0, Math.PI * 2, true);
     shape.holes.push(hole);
   }
   const geo = new THREE.ExtrudeGeometry(shape, {

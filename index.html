@@ -16,9 +16,50 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
     <title>Screwdom 3D</title>
+    <!--
+      First-paint splash. The stylesheet ships inside the JS bundle, so without
+      this the app is a blank dark rectangle until the bundle evaluates.
+      startApp() empties #app, which removes it.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0f1222;
+        color: #f4f5fb;
+        font-family: 'Nunito', 'SF Pro Rounded', system-ui, -apple-system, sans-serif;
+      }
+      #boot {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+      }
+      #boot img {
+        width: 132px;
+        height: 132px;
+        border-radius: 32px;
+        box-shadow: 0 18px 40px rgba(59, 125, 240, 0.35);
+      }
+      #boot b {
+        font-size: 22px;
+        font-weight: 900;
+        letter-spacing: 2px;
+        color: #9aa1c4;
+      }
+    </style>
   </head>
   <body>
-    <div id="app"></div>
+    <div id="app">
+      <div id="boot">
+        <img src="/icons/icon-192.png" alt="" draggable="false" />
+        <b>SCREWDOM 3D</b>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

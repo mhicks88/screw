@@ -27,7 +27,8 @@ export async function flyScrew(
   opts: FlightOptions,
 ): Promise<void> {
   const gen = w.generation;
-  const g = s.group;
+  // A flying screw needs its own transform, so it leaves the instanced field.
+  const g = w.field.detach(s);
   if (opts.delay) await w.tweens.delay(opts.delay);
   if (!isAlive(w, gen)) return;
   if (g.parent !== w.rig.boardRoot) w.rig.boardRoot.attach(g);
@@ -38,7 +39,7 @@ export async function flyScrew(
   const fromPlate = opts.from === 'plate';
   const lift = fromPlate ? 0.75 : 0.5;
   await w.tweens.run({
-    duration: fromPlate ? 190 : 140,
+    duration: fromPlate ? 175 : 130,
     ease: Easing.inOutQuad,
     onUpdate: (e, raw) => {
       g.position.z = start.z + lift * e;
@@ -53,7 +54,7 @@ export async function flyScrew(
   const p2 = new THREE.Vector3();
   const dirSign = Math.sign(getTarget().y - p0.y) || 1;
   await w.tweens.run({
-    duration: 360,
+    duration: 340,
     ease: Easing.inOutQuad,
     onUpdate: (e) => {
       p2.copy(getTarget());
@@ -70,7 +71,7 @@ export async function flyScrew(
   const s0 = g.position.clone();
   const rot1 = g.rotation.z;
   await w.tweens.run({
-    duration: 170,
+    duration: 160,
     ease: Easing.outQuad,
     onUpdate: (e, raw) => {
       g.position.lerpVectors(s0, getTarget(), e);
@@ -86,67 +87,129 @@ export async function flyScrew(
   g.scale.setScalar(1);
 }
 
-/** Plate tilts, falls out of the bottom of the screen, fades, and is disposed. */
+/**
+ * Plate releases toward the camera, tilts and falls out of the bottom of the
+ * screen while fading.
+ *
+ * v2: plates are 0.10 thin sheets stacked 0.12 apart, so the old "slide down and
+ * away from the camera" read as the plate sinking *into* the stack. It now pops
+ * forward (+z) first and keeps moving toward the camera as it falls, which
+ * separates it from the layers it used to sit between even in a fast cascade.
+ */
 export async function dropPlate(w: World, pv: PlateVisual): Promise<void> {
   const gen = w.generation;
   const m = pv.mesh;
   const mat = m.material;
+  const shadowMat = pv.shadow.material;
+  const shadow0 = shadowMat.opacity;
   mat.transparent = true;
   mat.needsUpdate = true;
   const y0 = m.position.y;
   const z0 = m.position.z;
   const rx0 = m.rotation.x;
   const rz0 = m.rotation.z;
-  const spin = (Math.random() - 0.5) * 0.6;
+  const spin = (Math.random() - 0.5) * 0.75;
+  m.renderOrder = 5;
+
+  // Release pop: the sheet unsticks from the stack.
   await w.tweens.run({
-    duration: 640,
+    duration: 110,
+    ease: Easing.outQuad,
+    onUpdate: (e) => {
+      m.position.z = z0 + 0.22 * e;
+      const k = 1 + 0.035 * e;
+      m.scale.set(k, k, 1);
+      shadowMat.opacity = shadow0 * (1 - 0.7 * e);
+    },
+  });
+  if (!isAlive(w, gen)) return;
+
+  await w.tweens.run({
+    duration: 520,
     ease: Easing.inQuad,
     onUpdate: (e, raw) => {
-      m.position.y = y0 - 10 * e;
-      m.position.z = z0 - 1.5 * e;
-      m.rotation.x = rx0 - 0.9 * raw;
+      m.position.y = y0 - 11 * e;
+      m.position.z = z0 + 0.22 + 0.75 * e;
+      m.rotation.x = rx0 - 1.15 * raw;
       m.rotation.z = rz0 + spin * raw;
-      mat.opacity = 1 - Math.max(0, raw - 0.3) / 0.7;
-      if (raw > 0.45) m.castShadow = false;
+      mat.opacity = 1 - Math.max(0, raw - 0.25) / 0.75;
+      shadowMat.opacity = shadow0 * 0.3 * (1 - raw);
     },
   });
   if (!isAlive(w, gen)) return;
   disposePlateVisual(pv);
   w.plates.delete(pv.id);
+  w.recomputeCover();
 }
 
 /** Side-to-side shake + white flash (blocked tap). */
 export async function shakeScrew(w: World, s: ScrewVisual): Promise<void> {
   const gen = w.generation;
-  const g = s.group;
-  const x0 = g.position.x;
+  const x0 = s.pos.x;
   const flash = flashMaterial();
-  s.body.material = flash;
+  s.flash = true;
+  w.field.setColor(s);
+  if (s.body) s.body.material = flash;
   await w.tweens.run({
     duration: 260,
     ease: Easing.linear,
     onUpdate: (e) => {
-      g.position.x = x0 + Math.sin(e * Math.PI * 5) * 0.11 * (1 - e);
-      if (e > 0.35 && s.body.material === flash) s.body.material = screwMaterial(s.revealed ? s.color : 'mystery');
+      s.pos.x = x0 + Math.sin(e * Math.PI * 5) * 0.11 * (1 - e);
+      w.field.setPose(s);
+      if (e > 0.35 && s.flash) {
+        s.flash = false;
+        w.field.setColor(s);
+        if (s.body && s.body.material === flash) s.body.material = screwMaterial(s.revealed ? s.color : 'mystery');
+      }
     },
   });
+  s.flash = false;
   if (!isAlive(w, gen)) return;
-  g.position.x = x0;
+  s.pos.x = x0;
+  w.field.setPose(s);
+  w.field.setColor(s);
   applyScrewColor(s, s.color, s.revealed);
 }
 
 /** Quick scale bump (unblocked / revealed feedback). */
 export function popScrew(w: World, s: ScrewVisual, amount = 0.22, duration = 260, delay = 0): Promise<void> {
-  const g = s.group;
   return w.tweens.run({
     duration,
     delay,
     ease: Easing.linear,
     onUpdate: (e) => {
-      const k = 1 + amount * Math.sin(e * Math.PI);
-      g.scale.setScalar(k);
+      s.scale = 1 + amount * Math.sin(e * Math.PI);
+      w.field.setPose(s);
     },
-    onComplete: () => g.scale.setScalar(1),
+    onComplete: () => {
+      s.scale = 1;
+      w.field.setPose(s);
+    },
+  });
+}
+
+/**
+ * A screw that has just been uncovered rises out of the stack: a short lift plus
+ * the scale bump. At 0.12 layer spacing the pure scale pop was too subtle to
+ * notice among 20 other screws.
+ */
+export function riseScrew(w: World, s: ScrewVisual, delay = 0): Promise<void> {
+  const z0 = s.home.z;
+  return w.tweens.run({
+    duration: 300,
+    delay,
+    ease: Easing.linear,
+    onUpdate: (e) => {
+      const k = Math.sin(e * Math.PI);
+      s.scale = 1 + 0.26 * k;
+      s.pos.z = z0 + 0.11 * k;
+      w.field.setPose(s);
+    },
+    onComplete: () => {
+      s.scale = 1;
+      s.pos.z = z0;
+      w.field.setPose(s);
+    },
   });
 }
 
@@ -155,11 +218,16 @@ export async function revealScrew(w: World, s: ScrewVisual, color: ScrewColor): 
   const gen = w.generation;
   applyScrewColor(s, color, true);
   const flash = flashMaterial();
-  s.body.material = flash;
+  s.flash = true;
+  w.field.setColor(s);
+  if (s.body) s.body.material = flash;
   const pop = popScrew(w, s, 0.35, 300);
   await w.tweens.delay(110);
   if (!isAlive(w, gen)) return;
-  if (s.body.material === flash) s.body.material = screwMaterial(s.color);
+  s.flash = false;
+  w.field.setColor(s);
+  w.field.markDirty();
+  if (s.body && s.body.material === flash) s.body.material = screwMaterial(s.color);
   await pop;
 }
 
@@ -170,7 +238,7 @@ export async function spawnBox(w: World, bv: BoxVisual, targetX: number): Promis
   g.visible = true;
   g.position.set(targetX, OFFSCREEN_Y, 0);
   await w.tweens.run({
-    duration: 420,
+    duration: 330,
     ease: Easing.outBack,
     onUpdate: (e) => {
       g.position.y = OFFSCREEN_Y + (BOX_Y - OFFSCREEN_Y) * e;
@@ -181,50 +249,49 @@ export async function spawnBox(w: World, bv: BoxVisual, targetX: number): Promis
   g.position.set(targetX, BOX_Y, 0);
 }
 
-/** Bounce, drop the lid, slide off the top of the screen, dispose box + its screws. */
-export async function completeBox(w: World, bv: BoxVisual): Promise<void> {
+/**
+ * Bounce, drop the lid, slide off the top of the screen, dispose box + its
+ * screws. `onVacated` fires the moment the box starts leaving, so the next box
+ * can slide into the same position while this one is still on its way out —
+ * at v2 scale a magnet or a cascade completes several boxes per position and
+ * fully serialising them was the single biggest stall in a long batch.
+ */
+export async function completeBox(w: World, bv: BoxVisual, onVacated?: () => void): Promise<void> {
   const gen = w.generation;
   const g = bv.group;
   const screws: ScrewVisual[] = [];
   for (const id of bv.screws) {
     const sv = w.screws.get(id);
-    if (sv) {
+    if (sv?.group) {
       screws.push(sv);
       g.attach(sv.group);
     }
   }
-  await w.tweens.run({
-    duration: 230,
-    ease: Easing.linear,
-    onUpdate: (e) => {
-      const k = 1 + 0.13 * Math.sin(e * Math.PI);
-      g.scale.set(k, k, k);
-    },
-  });
-  if (!isAlive(w, gen)) return;
-  g.scale.setScalar(1);
   bv.lid.visible = true;
-  await w.tweens.run({
-    duration: 200,
-    ease: Easing.inQuad,
-    onUpdate: (e) => {
-      bv.lid.position.z = BOX_HEIGHT + 1.4 * (1 - e);
-    },
-  });
-  if (!isAlive(w, gen)) return;
-  await w.tweens.run({
-    duration: 130,
-    ease: Easing.linear,
-    onUpdate: (e) => {
-      const k = 1 - 0.08 * Math.sin(e * Math.PI);
-      g.scale.set(1 / Math.sqrt(k), 1 / Math.sqrt(k), k);
-    },
-  });
+  // Bounce and the lid coming down run together rather than back to back.
+  await Promise.all([
+    w.tweens.run({
+      duration: 260,
+      ease: Easing.linear,
+      onUpdate: (e) => {
+        const k = 1 + 0.13 * Math.sin(e * Math.PI);
+        g.scale.set(k, k, k);
+      },
+    }),
+    w.tweens.run({
+      duration: 230,
+      ease: Easing.inQuad,
+      onUpdate: (e) => {
+        bv.lid.position.z = BOX_HEIGHT + 1.4 * (1 - e);
+      },
+    }),
+  ]);
   if (!isAlive(w, gen)) return;
   g.scale.setScalar(1);
+  onVacated?.();
   const y0 = g.position.y;
   await w.tweens.run({
-    duration: 340,
+    duration: 280,
     ease: Easing.inBack,
     onUpdate: (e) => {
       g.position.y = y0 + (OFFSCREEN_Y + 1 - y0) * e;
@@ -233,6 +300,7 @@ export async function completeBox(w: World, bv: BoxVisual): Promise<void> {
   if (!isAlive(w, gen)) return;
   for (const sv of screws) {
     disposeScrewVisual(sv);
+    w.field.forget(sv);
     w.screws.delete(sv.id);
   }
   disposeBoxVisual(bv);
@@ -310,7 +378,7 @@ export async function growTray(w: World, count: number): Promise<void> {
   w.traySlots.forEach((id, slot) => {
     if (id === null) return;
     const sv = w.screws.get(id);
-    if (!sv || sv.location !== 'tray') return;
+    if (!sv || sv.location !== 'tray' || !sv.group) return;
     const g = sv.group;
     const x0 = g.position.x;
     const x1 = xs[slot] ?? x0;

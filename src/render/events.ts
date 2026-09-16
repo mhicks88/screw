@@ -2,7 +2,6 @@ import type { GameEvent } from '../core/types';
 import { BOX_Y, OFFSCREEN_Y, boxPositionsX } from './layout';
 import type { World } from './world';
 import { boxSlotWorld, trayTargetWorld } from './world';
-import { setScrewHittable } from './screwMesh';
 import { createBoxVisual } from './boxMesh';
 import {
   completeBox,
@@ -10,9 +9,9 @@ import {
   flyScrew,
   growTray,
   layoutBoxes,
-  popScrew,
   recolorBox,
   revealScrew,
+  riseScrew,
   shakeScrew,
   shakeTray,
   spawnBox,
@@ -61,7 +60,19 @@ class Scheduler {
   }
 }
 
-const FLIGHT_STAGGER_MS = 70;
+/**
+ * Screw flights overlap rather than serialise. At the v2 scale one batch can
+ * hold 15 screws (magnet) or a whole tower's worth during a cascade, so the
+ * stagger shrinks with the batch size: total launch window stays under ~0.8 s
+ * and the longest batch finishes in well under 2 s.
+ */
+const FLIGHT_WINDOW_MS = 760;
+const FLIGHT_STAGGER_MAX = 70;
+const FLIGHT_STAGGER_MIN = 24;
+
+/** Same idea for the "you just uncovered these" ripple. */
+const RISE_WINDOW_MS = 520;
+const RISE_STAGGER_MAX = 34;
 
 export class EventPlayer {
   private readonly sched = new Scheduler();
@@ -82,6 +93,18 @@ export class EventPlayer {
     const created: Promise<void>[] = [];
     let flightIndex = 0;
     let lastPlateDrop: Promise<void> | null = null;
+
+    let flightCount = 0;
+    let finalTraySlots = w.traySlots.length;
+    for (const ev of events) {
+      if (ev.type === 'screwToBox' || ev.type === 'screwToTray') flightCount++;
+      else if (ev.type === 'traySlotAdded') finalTraySlots = Math.max(finalTraySlots, ev.slotIndex + 1);
+    }
+    let trayGrown = false;
+    const flightStagger =
+      flightCount <= 1
+        ? 0
+        : Math.max(FLIGHT_STAGGER_MIN, Math.min(FLIGHT_STAGGER_MAX, FLIGHT_WINDOW_MS / flightCount));
 
     const go = (
       waitKeys: string[],
@@ -109,9 +132,11 @@ export class EventPlayer {
           }
           const from = s.location === 'tray' ? 'tray' : ev.from;
           s.location = 'box';
-          setScrewHittable(s, false);
+          // Leave the instanced field now, not when the stagger delay expires,
+          // so a staggered screw does not blink out while it waits its turn.
+          w.field.detach(s);
           if (!b.screws.includes(s.id)) b.screws.push(s.id);
-          const delay = flightIndex++ * FLIGHT_STAGGER_MS;
+          const delay = flightIndex++ * flightStagger;
           let liftResolve: () => void = () => undefined;
           const lifted = new Promise<void>((r) => (liftResolve = r));
           if (from === 'plate') this.sched.register([`plate:${s.plateId}`], lifted);
@@ -127,10 +152,10 @@ export class EventPlayer {
           const s = w.screws.get(ev.screwId);
           if (!s) break;
           s.location = 'tray';
-          setScrewHittable(s, false);
+          w.field.detach(s);
           while (w.traySlots.length <= ev.traySlot) w.traySlots.push(null);
           w.traySlots[ev.traySlot] = s.id;
-          const delay = flightIndex++ * FLIGHT_STAGGER_MS;
+          const delay = flightIndex++ * flightStagger;
           let liftResolve: () => void = () => undefined;
           const lifted = new Promise<void>((r) => (liftResolve = r));
           this.sched.register([`plate:${s.plateId}`], lifted);
@@ -146,7 +171,14 @@ export class EventPlayer {
           const b = w.boxes.get(ev.boxId);
           if (!b) break;
           const posKey = `pos:${ev.position}`;
-          go([`box:${b.id}`, `boxflights:${b.id}`, posKey], [`box:${b.id}`, posKey], () => completeBox(w, b));
+          let vacate: () => void = () => undefined;
+          const vacated = new Promise<void>((r) => (vacate = r));
+          go([`box:${b.id}`, `boxflights:${b.id}`, posKey], [`box:${b.id}`], () =>
+            completeBox(w, b, vacate),
+          ).finally(vacate);
+          // The position frees up as soon as the box starts sliding out, not
+          // when it has finished; `go` already captured its own wait above.
+          this.sched.register([posKey], vacated);
           break;
         }
         case 'boxSpawn': {
@@ -173,20 +205,24 @@ export class EventPlayer {
           const pv = w.plates.get(ev.plateId);
           if (!pv || pv.dropped) break;
           pv.dropped = true;
-          for (const s of w.screws.values()) {
-            if (s.plateId === pv.id && s.location === 'plate') setScrewHittable(s, false);
-          }
+          w.field.markDirty();
           lastPlateDrop = go([`plate:${pv.id}`], [`plate:${pv.id}`], () => dropPlate(w, pv));
           break;
         }
         case 'screwsUnblocked': {
           const ids = ev.screwIds;
+          const stagger = ids.length <= 1 ? 0 : Math.min(RISE_STAGGER_MAX, RISE_WINDOW_MS / ids.length);
           go([], [], async () => {
             const runs: Promise<void>[] = [];
             ids.forEach((id, i) => {
               const s = w.screws.get(id);
-              if (s && s.location === 'plate') runs.push(popScrew(w, s, 0.2, 260, i * 30));
+              if (!s || s.location !== 'plate') return;
+              // The core is authoritative about reachability; trust it over the
+              // renderer's own geometric cover count.
+              s.coverCount = 0;
+              runs.push(riseScrew(w, s, i * stagger));
             });
+            w.field.markDirty();
             await Promise.all(runs);
           }, lastPlateDrop);
           break;
@@ -202,7 +238,12 @@ export class EventPlayer {
         }
         case 'traySlotAdded': {
           while (w.traySlots.length <= ev.slotIndex) w.traySlots.push(null);
-          const count = w.traySlots.length;
+          // Several slots added in one batch grow the bar once, together.
+          // Animating them one after another serialises the whole batch behind
+          // the 'tray' key, which at v2 scale can stall a long cascade.
+          if (trayGrown) break;
+          trayGrown = true;
+          const count = finalTraySlots;
           go(['tray'], ['tray'], () => growTray(w, count));
           break;
         }

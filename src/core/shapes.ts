@@ -9,8 +9,11 @@ import type { Rng } from './rng';
 
 const P = (x: number, y: number): Vec2 => ({ x, y });
 
-/** Minimum half-thickness so that a screw (0.45 margin) fits inside any arm. */
-export const MIN_ARM_THICKNESS = 1.5;
+/**
+ * Minimum arm thickness so that a screw (SCREW_EDGE_MARGIN = 0.34 margin) fits
+ * inside any arm of an L / T / cross / ring plate with a little slack.
+ */
+export const MIN_ARM_THICKNESS = 1.0;
 
 function finish(kind: PlateShapeKind, outline: Vec2[], holes?: Vec2[][]): PlateShape {
   const shape: PlateShape = { kind, outline: ensureCCW(outline) };
@@ -150,36 +153,69 @@ export const SHAPE_KINDS: PlateShapeKind[] = [
 
 /**
  * Build a randomised shape of the given kind. `size` is the approximate major
- * half-extent (so the plate fits in a 2*size square). Every shape keeps enough
- * body thickness for at least one screw with the 0.45 edge margin.
+ * half-extent (so the plate fits in a 2*size square) and the minor extent is
+ * picked at random. See `fittedShape` for the anisotropic version the tower
+ * layout uses.
  */
 export function makeShape(kind: PlateShapeKind, size: number, rng: Rng): PlateShape {
-  const s = Math.max(0.9, size);
-  const minor = Math.max(0.8, s * rng.float(0.55, 1));
+  const s = Math.max(0.7, size);
+  const minor = Math.max(0.6, s * rng.float(0.55, 1));
+  return fittedShape(kind, s, minor, rng);
+}
+
+/** Scale a polygon anisotropically (done at construction time, so plates stay rigid). */
+function scalePoly(poly: readonly Vec2[], sx: number, sy: number): Vec2[] {
+  return poly.map((p) => P(p.x * sx, p.y * sy));
+}
+
+/**
+ * Build a randomised shape of `kind` that roughly fills a 2*hw x 2*hh box.
+ * Used by the tower layout, where plate footprints are anisotropic. Every
+ * result keeps enough body thickness for a screw with SCREW_EDGE_MARGIN.
+ */
+export function fittedShape(kind: PlateShapeKind, hw: number, hh: number, rng: Rng): PlateShape {
+  hw = Math.max(0.55, hw);
+  hh = Math.max(0.55, hh);
+  const small = Math.min(hw, hh);
+  const big = Math.max(hw, hh);
+  const along = hw >= hh;
   switch (kind) {
-    case 'rect': return rectShape(s, minor);
-    case 'roundedRect': return roundedRectShape(s, minor, Math.min(0.35, minor * 0.4));
-    case 'circle': return circleShape(Math.max(0.85, s * 0.9));
+    case 'rect': return rectShape(hw, hh);
+    case 'roundedRect': return roundedRectShape(hw, hh, small * rng.float(0.18, 0.45));
+    case 'circle': return finish('circle', scalePoly(circleShape(1, 24).outline, hw, hh));
     case 'L': {
-      const t = Math.max(MIN_ARM_THICKNESS, s * rng.float(0.5, 0.65));
-      return lShape(2 * s, 2 * Math.max(minor, t * 0.75 + 0.5), t);
+      const t = Math.min(2 * small * 0.8, Math.max(MIN_ARM_THICKNESS, small * rng.float(0.95, 1.35)));
+      return lShape(2 * hw, 2 * hh, t);
     }
     case 'T': {
-      const t = Math.max(MIN_ARM_THICKNESS, s * rng.float(0.5, 0.65));
-      return tShape(2 * s, 2 * Math.max(minor, t * 0.75 + 0.5), t);
+      const t = Math.min(2 * small * 0.8, Math.max(MIN_ARM_THICKNESS, small * rng.float(0.95, 1.35)));
+      return tShape(2 * hw, 2 * hh, t);
     }
-    case 'triangle': return triangleShape(Math.max(1.8, s * 1.15));
-    case 'hexagon': return hexagonShape(Math.max(0.95, s * 0.95));
+    case 'triangle': return finish('triangle', scalePoly(triangleShape(1).outline, hw * 1.25, hh * 1.25));
+    case 'hexagon': return finish('hexagon', scalePoly(hexagonShape(1).outline, hw, hh * 1.06));
     case 'ring': {
-      const outer = Math.max(1.95, s);
-      const inner = Math.max(0.3, Math.min(outer - MIN_ARM_THICKNESS, outer * rng.float(0.25, 0.4)));
-      return ringShape(outer, inner);
+      const outer = small;
+      const inner = Math.max(0.22, Math.min(outer - MIN_ARM_THICKNESS, outer * rng.float(0.3, 0.46)));
+      if (inner < 0.22) return roundedRectShape(hw, hh, small * 0.3);
+      const o = scalePoly(circleShape(1, 24).outline, hw, hh);
+      const i = scalePoly(circleShape(1, 16).outline, (inner / outer) * hw, (inner / outer) * hh);
+      return finish('ring', o, [i]);
     }
-    case 'cross': return crossShape(Math.max(1.6, s), Math.max(MIN_ARM_THICKNESS, s * rng.float(0.5, 0.7)));
+    case 'cross': {
+      const a = Math.min(small * 0.8, Math.max(MIN_ARM_THICKNESS, small * rng.float(0.9, 1.3)) / 2);
+      return finish('cross', [
+        P(-a, -hh), P(a, -hh), P(a, -a), P(hw, -a), P(hw, a), P(a, a),
+        P(a, hh), P(-a, hh), P(-a, a), P(-hw, a), P(-hw, -a), P(-a, -a),
+      ]);
+    }
     case 'capsule': {
-      const r = Math.max(0.8, minor);
-      return capsuleShape(Math.max(0.2, s - r), r);
+      const r = Math.min(small, big * 0.85);
+      const cap = capsuleShape(Math.max(0.12, big - r), r);
+      return along ? cap : finish('capsule', cap.outline.map((p) => P(-p.y, p.x)));
     }
-    case 'polygon': return randomConvexPolygonShape(Math.max(1.2, s * 1.05), rng);
+    case 'polygon': {
+      const poly = randomConvexPolygonShape(1, rng);
+      return finish('polygon', scalePoly(poly.outline, hw * 1.12, hh * 1.12));
+    }
   }
 }

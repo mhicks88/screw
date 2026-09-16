@@ -7,7 +7,7 @@ import { BOX_CAPACITY, type GameSnapshot } from './types';
 import { Game } from './game';
 
 const BEAM_WIDTH = 4;
-const MAX_BRANCH = 12;
+const MAX_BRANCH = 14;
 
 function evaluate(g: Game): number {
   const status = g.getStatus();

@@ -1,16 +1,26 @@
 /**
  * App orchestration: screens, game loop glue between core <-> renderer <-> HUD.
+ *
+ * v2 notes (CONTRACT_V2):
+ *  - Levels reach ~150 screws, so a session is long: the board is persisted
+ *    after every move and can be resumed from the menu or the level grid.
+ *  - Generation costs up to ~2 s and happens in a worker behind a loading
+ *    overlay. `generateLevel` is never called to *describe* a level — the level
+ *    grid uses the pure `difficultyLabelFor(n)`.
  */
-import { Game, generateLevel, TOTAL_LEVELS } from '../core';
-import type { ActionResult, GameEvent, LevelDef, PowerUpId } from '../core/types';
+import { Game, TOTAL_LEVELS, difficultyLabelFor } from '../core';
+import type { ActionResult, GameEvent, GameSnapshot, LevelDef, PowerUpId } from '../core/types';
 import { GameRenderer } from '../render/renderer';
 import * as sfx from '../audio/sfx';
 import {
+  clearGameState,
   clearProgress,
   defaultProgress,
   firstUncompleted,
+  loadGameState,
   loadProgress,
   markCompleted,
+  saveGameState,
   saveProgress,
   setCurrentLevel,
   type Progress,
@@ -21,12 +31,20 @@ import { createMenu } from './menu';
 import { createLevelSelect, type Difficulty } from './levelSelect';
 import { createHud } from './hud';
 import { createSettings } from './settings';
+import { createLoadingOverlay } from './loading';
+import { LevelLoader } from './levelLoader';
 import { closeModal, isModalOpen, showConfirm, showHowToPlay, showLoseModal, showWinModal } from './modals';
 
 type ScreenName = 'menu' | 'levels' | 'game' | 'settings';
 
 const HINT_MS = 3000;
 const HOWTO_SEEN_KEY = 'screwdom.howto.seen';
+/** Debounce for writing the board to localStorage (a 150-screw board is ~50 KB). */
+const SAVE_DEBOUNCE_MS = 450;
+/** Once the overlay is up, keep it up this long so a fast build does not flicker. */
+const MIN_LOADING_MS = 320;
+/** Build the next level in the background this long after the current one starts. */
+const PREFETCH_DELAY_MS = 1500;
 
 const REFUSAL_TEXT: Record<NonNullable<ActionResult['reason']>, string> = {
   notPlaying: '',
@@ -58,17 +76,15 @@ export function startApp(): void {
   let levelNumber = progress.currentLevel;
   let targeting = false;
   let hintTimer = 0;
+  let saveTimer = 0;
+  let prefetchTimer = 0;
+  /** Bumped on every load request; a stale result is dropped. */
+  let loadToken = 0;
   const soundTimers = new Set<number>();
-  const difficultyCache = new Map<number, Difficulty>();
+  const loader = new LevelLoader();
 
-  const difficultyOf = (n: number): Difficulty => {
-    let d = difficultyCache.get(n);
-    if (!d) {
-      d = generateLevel(n).difficulty;
-      difficultyCache.set(n, d);
-    }
-    return d;
-  };
+  /** Pure, cheap, never generates a level (CONTRACT_V2 §7). */
+  const difficultyOf = (n: number): Difficulty => difficultyLabelFor(n);
 
   const completedSet = (): Set<number> => new Set(progress.completed);
   const nextLevelToPlay = (): number => {
@@ -81,7 +97,9 @@ export function startApp(): void {
   const menu = createMenu({
     onPlay: () => {
       sfx.play('click');
-      resumeOrStart(nextLevelToPlay());
+      const r = progress.resume;
+      if (r) void openLevel(r.level, 'auto');
+      else void openLevel(nextLevelToPlay(), 'new');
     },
     onLevels: () => {
       sfx.play('click');
@@ -98,7 +116,7 @@ export function startApp(): void {
     difficultyOf,
     onPick: (n) => {
       sfx.play('click');
-      resumeOrStart(n);
+      void openLevel(n, 'auto');
     },
     onBack: () => {
       sfx.play('click');
@@ -109,6 +127,31 @@ export function startApp(): void {
   const settings = createSettings({
     version: __APP_VERSION__,
     getSound: () => progress.settings.sound,
+    getResume: () => progress.resume,
+    onResume: (n: number) => {
+      sfx.play('click');
+      void openLevel(n, 'resume');
+    },
+    onDiscardSaved: () => {
+      sfx.play('click');
+      showConfirm({
+        title: 'Discard saved board?',
+        text: 'The level you are part-way through will start from scratch next time. Completed levels are kept.',
+        confirmLabel: 'Discard board',
+        danger: true,
+        onConfirm: () => {
+          const discarded = progress.resume?.level ?? null;
+          dropSave(true);
+          if (discarded === levelNumber && levelDef && game) {
+            // The board on screen is the one being discarded: reset it.
+            installGame(levelNumber, levelDef, new Game(levelDef));
+            showScreen('settings');
+          }
+          settings.refresh();
+          refreshMenu();
+        },
+      });
+    },
     setSound: (on) => {
       progress.settings.sound = on;
       sfx.setSoundEnabled(on);
@@ -127,7 +170,7 @@ export function startApp(): void {
       sfx.play('click');
       showConfirm({
         title: 'Reset progress?',
-        text: 'All completed levels will be forgotten. Settings are kept. This cannot be undone.',
+        text: 'All completed levels and the level you are part-way through will be forgotten. Settings are kept. This cannot be undone.',
         confirmLabel: 'Reset everything',
         danger: true,
         onConfirm: () => {
@@ -150,26 +193,33 @@ export function startApp(): void {
   const hud = createHud({
     onBack: () => {
       sfx.play('click');
-      showScreen('menu');
+      leaveGame();
     },
     onRestart: () => {
       sfx.play('click');
       const snap = game?.snapshot();
       if (!snap || snap.moves === 0) {
-        startLevel(levelNumber);
+        restartLevel();
         return;
       }
       showConfirm({
         title: 'Restart level?',
-        text: 'Every screw goes back to its plate.',
+        text: 'Every screw goes back to its plate and your saved board for this level is discarded.',
         confirmLabel: 'Restart',
-        onConfirm: () => startLevel(levelNumber),
+        onConfirm: () => restartLevel(),
       });
     },
     onPowerUp: (id) => usePowerUp(id),
     onCancelTargeting: () => {
       sfx.play('click');
       setTargeting(false);
+    },
+  });
+
+  const loading = createLoadingOverlay({
+    onCancel: () => {
+      sfx.play('click');
+      cancelLoad();
     },
   });
 
@@ -182,11 +232,16 @@ export function startApp(): void {
     game: gameScreen,
     settings: settings.el,
   };
-  // The toast lives at the root so it is visible from every screen.
-  root.append(menu.el, levels.el, gameScreen, settings.el, hud.toast);
+  // The toast and the loading overlay live at the root so they cover every screen.
+  root.append(menu.el, levels.el, gameScreen, settings.el, loading.el, hud.toast);
 
   function refreshMenu(): void {
-    menu.update(nextLevelToPlay(), progress.completed.length, TOTAL_LEVELS);
+    menu.update({
+      nextLevel: nextLevelToPlay(),
+      completedCount: progress.completed.length,
+      total: TOTAL_LEVELS,
+      resume: progress.resume,
+    });
   }
 
   function showScreen(name: ScreenName): void {
@@ -195,7 +250,9 @@ export function startApp(): void {
     screen = name;
     for (const [k, el] of Object.entries(screens)) el.classList.toggle('active', k === name);
     if (name === 'menu') refreshMenu();
-    if (name === 'levels') levels.show(levelNumber, completedSet());
+    if (name === 'levels') {
+      levels.show({ currentLevel: levelNumber, completed: completedSet(), resumeLevel: progress.resume?.level ?? null });
+    }
     if (name === 'settings') settings.refresh();
     if (name === 'game') {
       ensureRenderer().setActive(!document.hidden);
@@ -237,56 +294,189 @@ export function startApp(): void {
     updateInsets();
   }, 200));
   document.addEventListener('visibilitychange', () => {
+    if (document.hidden) saveNow();
     if (!renderer) return;
     renderer.setActive(!document.hidden && screen === 'game');
   });
+  window.addEventListener('pagehide', () => saveNow());
 
-  /* ---------------- game flow ---------------- */
-  function resumeOrStart(n: number): void {
-    const snap = game?.snapshot();
-    if (game && snap && levelNumber === n && snap.status === 'playing' && snap.moves > 0) {
+  /* ---------------- persistence ---------------- */
+  function saveNow(): void {
+    if (saveTimer) {
+      window.clearTimeout(saveTimer);
+      saveTimer = 0;
+    }
+    if (!game) return;
+    saveGameState(progress, levelNumber, game.snapshot());
+  }
+
+  function scheduleSave(): void {
+    if (saveTimer) window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => {
+      saveTimer = 0;
+      if (game) saveGameState(progress, levelNumber, game.snapshot());
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  /**
+   * Forget the saved board. By default only when it belongs to the level on
+   * screen — there is one save slot, and restarting level 5 must not throw away
+   * the board someone left half-finished on level 712.
+   */
+  function dropSave(any = false): void {
+    if (saveTimer) {
+      window.clearTimeout(saveTimer);
+      saveTimer = 0;
+    }
+    if (any || progress.resume === null || progress.resume.level === levelNumber) clearGameState(progress);
+  }
+
+  /* ---------------- level loading ---------------- */
+
+  /**
+   * `mode`:
+   *   'new'    — always build a fresh board.
+   *   'resume' — restore the saved board for this level (falls back to 'new').
+   *   'auto'   — resume if there is a saved board for this level, else 'new'.
+   */
+  async function openLevel(n: number, mode: 'new' | 'resume' | 'auto'): Promise<void> {
+    const target = Math.min(TOTAL_LEVELS, Math.max(1, Math.floor(n)));
+    const token = ++loadToken;
+
+    // Already on this board and mid-play: just go back to it.
+    const live = game?.snapshot();
+    if (mode !== 'new' && live && levelNumber === target && live.status === 'playing' && live.moves > 0) {
       showScreen('game');
       syncHud();
       return;
     }
-    startLevel(n);
+
+    saveNow(); // never lose the board we are leaving
+    const saved = mode === 'new' ? null : loadGameState(target);
+
+    if (saved) {
+      loading.show(target, difficultyOf(target), 'resume');
+      await nextFrame();
+      if (token !== loadToken) return;
+      let restored: Game | null = null;
+      try {
+        restored = Game.fromSnapshot(saved);
+      } catch (err) {
+        console.warn('[resume] saved board could not be restored, starting fresh', err);
+        clearGameState(progress);
+      }
+      if (restored) {
+        installGame(target, restored.snapshot().level, restored);
+        await nextFrame();
+        if (token === loadToken) loading.hide();
+        return;
+      }
+    }
+
+    // A cached level starts instantly; anything else gets the overlay.
+    // generateLevel is deterministic, so the LevelDef already in hand for this
+    // level is exactly what a rebuild would produce.
+    let def = loader.peek(target) ?? (levelDef?.level === target ? levelDef : undefined);
+    if (!def) {
+      loading.show(target, difficultyOf(target), 'build');
+      const t0 = performance.now();
+      try {
+        def = await loader.request(target);
+      } catch (err) {
+        console.error(`generateLevel(${target}) failed`, err);
+        if (token !== loadToken) return;
+        loading.fail(target, () => {
+          loading.hide();
+          showScreen(screen === 'game' ? 'levels' : screen);
+        });
+        return;
+      }
+      if (token !== loadToken) return;
+      const wait = MIN_LOADING_MS - (performance.now() - t0);
+      if (wait > 0) await delay(wait);
+      if (token !== loadToken) return;
+    }
+
+    installGame(target, def, new Game(def));
+    await nextFrame();
+    if (token === loadToken) loading.hide();
     maybeShowHowTo();
   }
 
-  function startLevel(n: number): void {
-    const target = Math.min(TOTAL_LEVELS, Math.max(1, n));
-    let def: LevelDef;
-    try {
-      def = generateLevel(target);
-    } catch (err) {
-      console.error(`generateLevel(${target}) failed`, err);
-      hud.showToast(`Level ${target} could not be built`);
-      if (screen !== 'game') showScreen(screen);
-      return;
-    }
-    levelNumber = target;
+  /** Put a freshly built / restored game on screen. */
+  function installGame(n: number, def: LevelDef, g: Game): void {
+    levelNumber = n;
     levelDef = def;
-    difficultyCache.set(levelNumber, levelDef.difficulty);
-    game = new Game(levelDef);
+    game = g;
     setCurrentLevel(progress, levelNumber);
     clearSoundTimers();
     clearHint();
+    levels.setPending(null);
     showScreen('game');
-    const r = ensureRenderer();
-    r.loadLevel(game.snapshot());
-    hud.setLevel(levelNumber, levelDef.difficulty);
-    hud.setPowerUpsEnabled(true);
-    syncHud();
+    const snap = g.snapshot();
+    ensureRenderer().loadLevel(snap);
+    hud.setLevel(levelNumber, def.difficulty);
+    hud.setPowerUpsEnabled(snap.status === 'playing');
+    hud.setProgress(snap.removedScrews, snap.totalScrews);
+    hud.setTray(snap.tray.filter((s) => s !== null).length, snap.tray.length);
+    schedulePrefetch(levelNumber + 1);
+  }
+
+  /** Rebuild the same level from the LevelDef we already have — no generation. */
+  function restartLevel(): void {
+    if (!levelDef) {
+      void openLevel(levelNumber, 'new');
+      return;
+    }
+    dropSave();
+    installGame(levelNumber, levelDef, new Game(levelDef));
+  }
+
+  function cancelLoad(): void {
+    loadToken++;
+    loading.hide();
+    levels.setPending(null);
+    if (screen === 'game' && !game) showScreen('menu');
+  }
+
+  function schedulePrefetch(n: number): void {
+    if (prefetchTimer) window.clearTimeout(prefetchTimer);
+    if (n > TOTAL_LEVELS) return;
+    prefetchTimer = window.setTimeout(() => {
+      prefetchTimer = 0;
+      loader.prefetch(n);
+    }, PREFETCH_DELAY_MS);
+  }
+
+  const nextFrame = (): Promise<void> => new Promise((r) => requestAnimationFrame(() => r()));
+  const delay = (ms: number): Promise<void> => new Promise((r) => window.setTimeout(r, ms));
+
+  /* ---------------- game flow ---------------- */
+  function leaveGame(): void {
+    const snap = game?.snapshot();
+    if (!snap || snap.status !== 'playing' || snap.moves === 0) {
+      dropSave();
+      showScreen('menu');
+      return;
+    }
+    saveNow();
+    showConfirm({
+      title: 'Leave this level?',
+      text: `Level ${levelNumber} is ${snap.removedScrews} / ${snap.totalScrews} done. Your board is saved — "Resume" on the menu picks it up exactly where you left off.`,
+      confirmLabel: 'Save & leave',
+      onConfirm: () => showScreen('menu'),
+    });
   }
 
   function syncHud(): void {
     if (!game) return;
     const snap = game.snapshot();
     hud.setProgress(snap.removedScrews, snap.totalScrews);
+    hud.setTray(snap.tray.filter((s) => s !== null).length, snap.tray.length);
   }
 
   function handleScrewTap(screwId: number): void {
-    if (!game || screen !== 'game' || isModalOpen()) return;
+    if (!game || screen !== 'game' || isModalOpen() || loading.isVisible()) return;
     if (game.snapshot().status !== 'playing') return;
     clearHint();
     let res: ActionResult;
@@ -345,6 +535,8 @@ export function startApp(): void {
     syncHud();
     const won = res.events.some((e) => e.type === 'win');
     const lost = res.events.some((e) => e.type === 'lose');
+    if (won) dropSave();
+    else scheduleSave();
     const thisGame = game;
     const done = r.playEvents(res.events);
     if (won || lost) {
@@ -361,6 +553,7 @@ export function startApp(): void {
     if (!game) return;
     const snap = game.snapshot();
     markCompleted(progress, levelNumber);
+    dropSave();
     sfx.play('win');
     showWinModal({
       level: levelNumber,
@@ -369,7 +562,7 @@ export function startApp(): void {
       isLast: levelNumber >= TOTAL_LEVELS,
       onNext: () => {
         sfx.play('click');
-        startLevel(levelNumber >= TOTAL_LEVELS ? firstUncompleted(progress, TOTAL_LEVELS) : levelNumber + 1);
+        void openLevel(levelNumber >= TOTAL_LEVELS ? firstUncompleted(progress, TOTAL_LEVELS) : levelNumber + 1, 'new');
       },
       onLevels: () => {
         sfx.play('click');
@@ -380,6 +573,8 @@ export function startApp(): void {
 
   function onLose(): void {
     sfx.play('lose');
+    // A lost board is not resumable; drop it so the menu does not offer it.
+    dropSave();
     showLoseModal({
       onAddHole: () => {
         if (!game) return;
@@ -388,10 +583,12 @@ export function startApp(): void {
         hud.pulse('addSlot');
         sfx.play('powerup');
         applyResult(res);
+        syncHud();
+        scheduleSave();
       },
       onRetry: () => {
         sfx.play('click');
-        startLevel(levelNumber);
+        restartLevel();
       },
       onLevels: () => {
         sfx.play('click');
@@ -511,12 +708,24 @@ export function startApp(): void {
       get progress() {
         return progress;
       },
+      get levelNumber() {
+        return levelNumber;
+      },
       /** Same code path as a real tap on the canvas. */
       debugTap: (id: number) => handleScrewTap(id),
-      startLevel,
+      startLevel: (n: number) => openLevel(n, 'new'),
+      openLevel: (n: number, mode: 'new' | 'resume' | 'auto' = 'auto') => openLevel(n, mode),
       showScreen,
       usePowerUp,
       difficultyOf,
+      isLoading: () => loading.isVisible(),
+      saveNow,
+      loadSaved: (n?: number): GameSnapshot | null => loadGameState(n),
+      reloadProgress: () => {
+        progress = loadProgress();
+        refreshMenu();
+        return progress;
+      },
     };
   }
 }

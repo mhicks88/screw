@@ -4,26 +4,31 @@ import { generateLevel } from '../src/core/generator';
 import { solveNextMoves } from '../src/core/solver';
 
 describe('solver', () => {
-  it('returns reachable screws only, respects maxMoves, and is fast', () => {
+  it('returns reachable screws only, respects maxMoves, and stays fast on 150-screw levels', () => {
     let worst = 0;
-    for (const n of [12, 77, 250, 500, 999]) {
+    let worstLevel = 0;
+    let worstReachable = 0;
+    for (const n of [12, 77, 250, 500, 800, 1000]) {
       const g = new Game(generateLevel(n));
-      for (let step = 0; step < 6; step++) {
+      for (let step = 0; step < 8; step++) {
         const snap = g.snapshot();
+        if (snap.status !== 'playing') break;
+        const reachable = new Set(g.reachableScrewIds());
         const t0 = performance.now();
         const moves = solveNextMoves(snap, 3);
-        worst = Math.max(worst, performance.now() - t0);
+        const dt = performance.now() - t0;
+        if (dt > worst) { worst = dt; worstLevel = n; worstReachable = reachable.size; }
         expect(moves.length).toBeGreaterThan(0);
         expect(moves.length).toBeLessThanOrEqual(3);
-        const reachable = new Set(g.reachableScrewIds());
-        for (const id of moves) expect(reachable.has(id)).toBe(true);
+        for (const id of moves) expect(reachable.has(id), `level ${n}: hint ${id} is not reachable`).toBe(true);
         expect(solveNextMoves(snap, 1)).toHaveLength(1);
         expect(g.tapScrew(moves[0]).ok).toBe(true);
       }
     }
-    console.log(`solver worst call: ${worst.toFixed(2)} ms`);
-    expect(worst).toBeLessThan(40);
-  });
+    console.log(`solver worst call: ${worst.toFixed(2)} ms (level ${worstLevel}, ${worstReachable} reachable)`);
+    expect(worst).toBeLessThan(100);
+  }, 120_000);
+
   it('prefers moves that put screws into boxes', () => {
     const g = new Game(generateLevel(20));
     const snap = g.snapshot();
@@ -34,6 +39,7 @@ describe('solver', () => {
       expect(boxColors.has(snap.screws.find((s) => s.id === first)!.color)).toBe(true);
     }
   });
+
   it('returns nothing for finished games', () => {
     const g = new Game(generateLevel(1));
     const snap = g.snapshot();

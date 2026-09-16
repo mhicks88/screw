@@ -34,6 +34,10 @@ export const ICONS = {
   screw: wrap(
     '<circle cx="12" cy="12" r="8.5" fill="currentColor" stroke="none" opacity="0.25"/><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v9M7.5 12h9" stroke-width="2.5"/>',
   ),
+  /** Flat screw head: reads as "turning a screw" while the loader spins it. */
+  screwHead: wrap(
+    '<circle cx="12" cy="12" r="8.5" fill="currentColor" stroke="none" opacity="0.2"/><circle cx="12" cy="12" r="8.5"/><path d="M6.6 12h10.8" stroke-width="2.8"/>',
+  ),
 };
 
 export const POWERUP_ICONS: Record<PowerUpId, string> = {
