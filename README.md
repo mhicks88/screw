@@ -5,14 +5,29 @@ your phone with no account, no server, no purchases and no leagues. Every level
 is open and every power-up is free and unlimited.
 
 - 1000 procedurally generated, deterministic, solvable levels ramping from
-  9-screw tutorials to 150-screw towers up to 15 plates deep.
-- Levels are built as interlocking towers, so several parts of the board are
-  always workable at once rather than one forced peel order.
-- Six power-ups: Drill, Extra Hole, Magic Box, Repaint, Magnet, Hint.
-- Three.js rendering, WebAudio-synthesized sound, progress saved on-device.
+  9-screw tutorials to 150-screw stacks up to 15 plates deep.
+- Levels are built as 2-4 interlocking towers, so several parts of the board
+  are workable at once. Every level is machine-verified to keep at least 3
+  distinct plates and 8 screws in play on average, so you always have a choice
+  of where to dig.
+- Six power-ups, all free and unlimited: Drill, Extra Hole, Magic Box, Repaint,
+  Magnet and Hint.
+- Three.js rendering with covered screws culled and the rest drawn in two
+  instanced batches, so a 150-screw board costs about 151 draw calls.
+- WebAudio-synthesized sound, no asset downloads.
+- Your board is saved as you play, so you can leave a long level and resume it
+  exactly where you were, even after closing the app.
 - Tuned specifically for iPhone 17 Pro Max (440x956 pt at 3x).
-- Ships as a Progressive Web App: open it once, add it to your Home Screen,
-  and it works offline like a native app.
+
+Level size by band:
+
+| Levels | Screws | Layers | Towers | Tray slots | Boxes |
+|---|---|---|---|---|---|
+| 1-30 | 9-30 | 1-5 | 1-2 | 5 | 3 |
+| 31-120 | 30-54 | 5-8 | 2 | 5-6 | 3 |
+| 121-350 | 57-90 | 8-11 | 2-3 | 6-7 | 3 |
+| 351-700 | 90-123 | 10-13 | 3 | 7 | 3 |
+| 701-1000 | 126-150 | 12-15 | 3-4 | 8 | 4 |
 
 ## Run it on your iPhone
 
@@ -59,9 +74,13 @@ npx cap open ios      # opens Xcode: pick your team, plug in the phone, Run
 
 ```bash
 npm run dev          # dev server with hot reload (use --host to test on phone)
-npm test             # vitest: rules + all 1000 levels verified solvable
+npm test             # vitest: rules + 139 sampled levels verified solvable (~80 s)
+npm run sweep        # verify all 1000 levels and print the stats table (~12 min)
 npm run build        # typecheck + production build into dist/
 ```
+
+Level generation takes roughly half a second and runs in a Web Worker, so the
+interface stays responsive; the game shows a loading card while it works.
 
 Code layout is described in `CONTRACT.md`:
 `src/core` (rules, generator, solver), `src/render` (three.js scene),
