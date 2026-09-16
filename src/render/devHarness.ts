@@ -77,12 +77,12 @@ function buildFakeLevel(): LevelDef {
     { plate: 0, lx: -1.8, ly: 1.0, color: 'red' },
     { plate: 0, lx: -0.6, ly: 1.1, color: 'blue' },
     { plate: 0, lx: 1.4, ly: 1.1, color: 'green' },
-    { plate: 0, lx: 0.4, ly: -0.2, color: 'yellow', hidden: true },
+    { plate: 0, lx: 0.4, ly: -0.2, color: 'yellow' },
     { plate: 0, lx: 1.8, ly: -1.0, color: 'red' },
     { plate: 1, lx: -1.5, ly: 0.6, color: 'blue' },
     { plate: 1, lx: -1.4, ly: -0.7, color: 'green' },
     { plate: 1, lx: 0.2, ly: -0.9, color: 'yellow' },
-    { plate: 2, lx: -1.1, ly: 0.9, color: 'red' },
+    { plate: 2, lx: -1.1, ly: 0.9, color: 'red', hidden: true },
     { plate: 2, lx: -0.9, ly: -0.7, color: 'blue' },
     { plate: 2, lx: 0.9, ly: -0.7, color: 'green' },
     { plate: 3, lx: -0.5, ly: 0.1, color: 'yellow' },
@@ -94,9 +94,7 @@ function buildFakeLevel(): LevelDef {
     const w = toWorld(p(r.plate), r.lx, r.ly);
     return { id: i, plateId: r.plate, x: w.x, y: w.y, color: r.color, hidden: !!r.hidden };
   });
-  // 15 screws: 4 red, 3 blue, 4 green, 4 yellow is not balanced; fix to multiples of 3 → 15 = 5 boxes
-  const counts: Record<string, number> = {};
-  for (const s of screws) counts[s.color] = (counts[s.color] ?? 0) + 1;
+  // 15 screws = 5 boxes; the queue lists more than needed, extras are ignored.
   const queue: ScrewColor[] = ['blue', 'red', 'green', 'yellow', 'red', 'green', 'yellow'];
   return {
     level: 1,
@@ -327,8 +325,9 @@ async function loadCore(): Promise<CoreModule | null> {
 async function main(): Promise<void> {
   const container = document.getElementById('app')!;
   const status = document.getElementById('status')!;
-  const core = await loadCore();
   const params = new URLSearchParams(location.search);
+  // `?fake=1` forces the built-in fake game (mystery screw, 3 layers) even when the real core exists.
+  const core = params.get('fake') ? null : await loadCore();
   let levelNo = Number(params.get('level') ?? '1') || 1;
   let game: GameApi;
   const newGame = () => {
@@ -390,6 +389,19 @@ async function main(): Promise<void> {
     snapshot: () => game.snapshot(),
     reachable: () => game.reachableScrewIds(),
     restart: newGame,
+    /**
+     * Debug: advance animations by `ms` regardless of wall clock (use with
+     * renderer.timeScale = 0). Ticks in 16 ms steps and yields to the event
+     * loop between ticks so promise-chained animation phases can start.
+     */
+    step: async (ms: number) => {
+      const r = renderer as unknown as { tweens: { update(dt: number): void }; effects: { update(dt: number): void } };
+      for (let t = 0; t < ms; t += 16) {
+        r.tweens.update(16);
+        r.effects.update(16);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    },
   };
 }
 

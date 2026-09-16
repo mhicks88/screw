@@ -1,14 +1,8 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { COLOR_HEX } from '../core/types';
 import type { BoxState, ScrewColor } from '../core/types';
-import {
-  BOX_DEPTH,
-  BOX_HEIGHT,
-  BOX_HOLE_R,
-  BOX_SLOT_SPACING,
-  BOX_WIDTH,
-  BOX_Y,
-} from './layout';
+import { BOX_DEPTH, BOX_HEIGHT, BOX_HOLE_R, BOX_SLOT_SPACING, BOX_WIDTH, BOX_Y } from './layout';
 
 export interface BoxVisual {
   id: number;
@@ -22,13 +16,19 @@ export interface BoxVisual {
   screws: number[];
 }
 
-let bodyGeo: THREE.BufferGeometry | null = null;
-let lidGeo: THREE.BufferGeometry | null = null;
-let floorGeo: THREE.BufferGeometry | null = null;
-let floorMat: THREE.MeshStandardMaterial | null = null;
-let stripeGeo: THREE.BufferGeometry | null = null;
+interface BoxGeometries {
+  body: THREE.BufferGeometry;
+  lid: THREE.BufferGeometry;
+  stripe: THREE.BufferGeometry;
+  inset: THREE.BufferGeometry;
+  holes: THREE.BufferGeometry;
+  rims: THREE.BufferGeometry;
+}
+
+let geos: BoxGeometries | null = null;
 let stripeMat: THREE.MeshStandardMaterial | null = null;
-let insetGeo: THREE.BufferGeometry | null = null;
+let holeMat: THREE.MeshStandardMaterial | null = null;
+let rimMat: THREE.MeshStandardMaterial | null = null;
 
 const BEVEL = 0.05;
 
@@ -57,73 +57,83 @@ export function boxSlotLocal(slot: number): THREE.Vector3 {
   return new THREE.Vector3(boxSlotLocalX(slot), 0, BOX_HEIGHT);
 }
 
-function geometries() {
-  if (!bodyGeo) {
-    // NOTE: ExtrudeGeometry's bevelled-lid triangulation (earcut) silently
-    // fills a hole when a negative bevelOffset is used or when holes come
-    // within ~0.05 of each other. So: bevelOffset 0, outline shrunk by the
-    // bevel size, holes at shaft radius (the bevel widens their mouth).
-    const bs = BEVEL * 0.9;
-    const shape = roundedRect(BOX_WIDTH - 2 * bs, BOX_DEPTH - 2 * bs, 0.2 - bs);
-    for (let i = 0; i < 3; i++) {
-      const hole = new THREE.Path();
-      hole.absarc(boxSlotLocalX(i), 0, BOX_HOLE_R, 0, Math.PI * 2, true);
-      shape.holes.push(hole);
-    }
-    bodyGeo = new THREE.ExtrudeGeometry(shape, {
-      depth: BOX_HEIGHT - 2 * BEVEL,
-      bevelEnabled: true,
-      bevelThickness: BEVEL,
-      bevelSize: bs,
-      bevelOffset: 0,
-      bevelSegments: 3,
-      curveSegments: 10,
-    });
-    bodyGeo.translate(0, 0, BEVEL);
-    bodyGeo.computeVertexNormals();
+/**
+ * The box is a solid bevelled block; the three "holes" are dark discs with a
+ * light rim on the top face. (Cutting real holes through a bevelled
+ * ExtrudeGeometry makes earcut silently fill one of them for this shape.)
+ * With the near top-down camera the discs read as holes, and a parked screw's
+ * shaft is hidden inside the solid body.
+ */
+function geometries(): BoxGeometries {
+  if (geos) return geos;
+  const body = new THREE.ExtrudeGeometry(roundedRect(BOX_WIDTH, BOX_DEPTH, 0.2), {
+    depth: BOX_HEIGHT - 2 * BEVEL,
+    bevelEnabled: true,
+    bevelThickness: BEVEL,
+    bevelSize: BEVEL * 0.9,
+    bevelOffset: -BEVEL * 0.9,
+    bevelSegments: 3,
+    curveSegments: 10,
+  });
+  body.translate(0, 0, BEVEL);
+  body.computeVertexNormals();
 
-    const lidShape = roundedRect(BOX_WIDTH + 0.06, BOX_DEPTH + 0.06, 0.22);
-    lidGeo = new THREE.ExtrudeGeometry(lidShape, {
-      depth: 0.1,
-      bevelEnabled: true,
-      bevelThickness: 0.04,
-      bevelSize: 0.035,
-      bevelOffset: -0.035,
-      bevelSegments: 2,
-      curveSegments: 10,
-    });
-    lidGeo.translate(0, 0, 0.04);
-    lidGeo.computeVertexNormals();
+  const lid = new THREE.ExtrudeGeometry(roundedRect(BOX_WIDTH + 0.06, BOX_DEPTH + 0.06, 0.22), {
+    depth: 0.1,
+    bevelEnabled: true,
+    bevelThickness: 0.04,
+    bevelSize: 0.035,
+    bevelOffset: -0.035,
+    bevelSegments: 2,
+    curveSegments: 10,
+  });
+  lid.translate(0, 0, 0.04);
+  lid.computeVertexNormals();
 
-    floorGeo = new THREE.PlaneGeometry(BOX_WIDTH - 0.1, BOX_DEPTH - 0.1);
-    floorMat = new THREE.MeshStandardMaterial({ color: 0x1a1c24, roughness: 0.9, metalness: 0.1 });
+  const stripe = new THREE.ExtrudeGeometry(roundedRect(BOX_WIDTH + 0.02, BOX_DEPTH + 0.02, 0.21), {
+    depth: 0.16,
+    bevelEnabled: false,
+    curveSegments: 10,
+  });
 
-    // Decorative darker band around the lower body.
-    stripeGeo = new THREE.ExtrudeGeometry(roundedRect(BOX_WIDTH + 0.02, BOX_DEPTH + 0.02, 0.21), {
-      depth: 0.16,
-      bevelEnabled: false,
-      curveSegments: 10,
-    });
-    stripeMat = new THREE.MeshStandardMaterial({ color: 0x000000, roughness: 0.6, metalness: 0.05, transparent: true, opacity: 0.22 });
+  const inset = new THREE.ShapeGeometry(roundedRect(BOX_WIDTH - 0.26, BOX_DEPTH - 0.26, 0.12), 8);
 
-    // Darker inset panel on the top face (reads as the open mouth of the box).
-    const insetShape = roundedRect(BOX_WIDTH - 0.26, BOX_DEPTH - 0.26, 0.12);
-    for (let i = 0; i < 3; i++) {
-      const hole = new THREE.Path();
-      hole.absarc(boxSlotLocalX(i), 0, BOX_HOLE_R + bs + 0.01, 0, Math.PI * 2, true);
-      insetShape.holes.push(hole);
-    }
-    insetGeo = new THREE.ShapeGeometry(insetShape, 10);
+  const discs: THREE.BufferGeometry[] = [];
+  const rings: THREE.BufferGeometry[] = [];
+  for (let i = 0; i < 3; i++) {
+    const d = new THREE.CircleGeometry(BOX_HOLE_R + 0.03, 28);
+    d.translate(boxSlotLocalX(i), 0, 0);
+    discs.push(d);
+    const r = new THREE.RingGeometry(BOX_HOLE_R + 0.03, BOX_HOLE_R + 0.065, 28);
+    r.translate(boxSlotLocalX(i), 0, 0);
+    rings.push(r);
   }
-  return {
-    bodyGeo: bodyGeo!,
-    lidGeo: lidGeo!,
-    floorGeo: floorGeo!,
-    floorMat: floorMat!,
-    stripeGeo: stripeGeo!,
-    stripeMat: stripeMat!,
-    insetGeo: insetGeo!,
-  };
+  const holes = mergeGeometries(discs, false) ?? discs[0];
+  const rims = mergeGeometries(rings, false) ?? rings[0];
+  for (const g of discs) if (g !== holes) g.dispose();
+  for (const g of rings) if (g !== rims) g.dispose();
+
+  geos = { body, lid, stripe, inset, holes, rims };
+  return geos;
+}
+
+function materials() {
+  stripeMat ??= new THREE.MeshStandardMaterial({
+    color: 0x000000,
+    roughness: 0.6,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.22,
+  });
+  holeMat ??= new THREE.MeshStandardMaterial({ color: 0x14161d, roughness: 0.9, metalness: 0.1 });
+  rimMat ??= new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.5,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.35,
+  });
+  return { stripeMat, holeMat, rimMat };
 }
 
 function boxColor(color: ScrewColor): THREE.Color {
@@ -135,26 +145,23 @@ function boxColor(color: ScrewColor): THREE.Color {
 
 export function createBoxVisual(state: BoxState, worldX: number): BoxVisual {
   const g = geometries();
+  const m = materials();
   const group = new THREE.Group();
   group.name = `box-${state.id}`;
   group.position.set(worldX, BOX_Y, 0);
 
-  const mat = new THREE.MeshStandardMaterial({
+  const bodyMat = new THREE.MeshStandardMaterial({
     color: boxColor(state.color),
     roughness: 0.5,
     metalness: 0.03,
     envMapIntensity: 0.4,
   });
-  const body = new THREE.Mesh(g.bodyGeo, mat);
+  const body = new THREE.Mesh(g.body, bodyMat);
   body.castShadow = true;
   body.receiveShadow = true;
   group.add(body);
 
-  const floor = new THREE.Mesh(g.floorGeo, g.floorMat);
-  floor.position.z = 0.3;
-  group.add(floor);
-
-  const stripe = new THREE.Mesh(g.stripeGeo, g.stripeMat);
+  const stripe = new THREE.Mesh(g.stripe, m.stripeMat);
   stripe.position.z = 0.08;
   group.add(stripe);
 
@@ -164,10 +171,18 @@ export function createBoxVisual(state: BoxState, worldX: number): BoxVisual {
     metalness: 0.02,
     envMapIntensity: 0.3,
   });
-  const inset = new THREE.Mesh(g.insetGeo, insetMat);
-  inset.position.z = BOX_HEIGHT + 0.004;
+  const inset = new THREE.Mesh(g.inset, insetMat);
+  inset.position.z = BOX_HEIGHT + 0.003;
   inset.receiveShadow = true;
   group.add(inset);
+
+  const holes = new THREE.Mesh(g.holes, m.holeMat);
+  holes.position.z = BOX_HEIGHT + 0.006;
+  group.add(holes);
+
+  const rims = new THREE.Mesh(g.rims, m.rimMat);
+  rims.position.z = BOX_HEIGHT + 0.006;
+  group.add(rims);
 
   const lidMat = new THREE.MeshStandardMaterial({
     color: boxColor(state.color).multiplyScalar(0.85),
@@ -175,7 +190,7 @@ export function createBoxVisual(state: BoxState, worldX: number): BoxVisual {
     metalness: 0.03,
     envMapIntensity: 0.4,
   });
-  const lid = new THREE.Mesh(g.lidGeo, lidMat);
+  const lid = new THREE.Mesh(g.lid, lidMat);
   lid.visible = false;
   lid.castShadow = true;
   lid.position.z = BOX_HEIGHT + 1.4;
@@ -208,13 +223,12 @@ export function disposeBoxVisual(v: BoxVisual): void {
 }
 
 export function disposeBoxCaches(): void {
-  bodyGeo?.dispose();
-  lidGeo?.dispose();
-  floorGeo?.dispose();
-  floorMat?.dispose();
-  stripeGeo?.dispose();
+  if (geos) {
+    for (const g of Object.values(geos)) g.dispose();
+    geos = null;
+  }
   stripeMat?.dispose();
-  insetGeo?.dispose();
-  bodyGeo = lidGeo = floorGeo = stripeGeo = insetGeo = null;
-  floorMat = stripeMat = null;
+  holeMat?.dispose();
+  rimMat?.dispose();
+  stripeMat = holeMat = rimMat = null;
 }

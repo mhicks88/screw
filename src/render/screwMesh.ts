@@ -16,7 +16,6 @@ export interface ScrewVisual {
   location: ScrewLocation;
   group: THREE.Group;
   body: THREE.Mesh;
-  cross: THREE.Mesh;
   mystery: THREE.Mesh;
   hit: THREE.Mesh;
   hintRing: THREE.Mesh;
@@ -27,7 +26,6 @@ export interface ScrewVisual {
 
 interface ScrewGeometryCache {
   body: THREE.BufferGeometry;
-  cross: THREE.BufferGeometry;
   hit: THREE.BufferGeometry;
   hintRing: THREE.BufferGeometry;
   targetRing: THREE.BufferGeometry;
@@ -36,7 +34,6 @@ interface ScrewGeometryCache {
 
 let geoCache: ScrewGeometryCache | null = null;
 const materialCache = new Map<string, THREE.MeshStandardMaterial>();
-let crossMaterial: THREE.MeshStandardMaterial | null = null;
 let hitMaterial: THREE.MeshBasicMaterial | null = null;
 let hintMaterial: THREE.MeshBasicMaterial | null = null;
 let targetMaterial: THREE.MeshBasicMaterial | null = null;
@@ -45,6 +42,18 @@ let flashMaterialCached: THREE.MeshStandardMaterial | null = null;
 
 /** Height of the head above the screw group's origin (plate surface). */
 export const SCREW_HEAD_TOP = 0.2;
+
+function tintGeometry(geo: THREE.BufferGeometry, r: number, g: number, b: number): THREE.BufferGeometry {
+  const n = geo.attributes.position.count;
+  const colors = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    colors[i * 3] = r;
+    colors[i * 3 + 1] = g;
+    colors[i * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  return geo;
+}
 
 function buildGeometries(): ScrewGeometryCache {
   const r = SCREW_HEAD_R;
@@ -61,19 +70,18 @@ function buildGeometries(): ScrewGeometryCache {
   dome.rotateX(Math.PI / 2);
   dome.scale(1, 1, 0.5);
   dome.translate(0, 0, 0.075);
-  const body = mergeGeometries([shaft, rim, dome], false) ?? dome;
-  shaft.dispose();
-  rim.dispose();
-  if (body !== dome) dome.dispose();
-  body.computeVertexNormals();
-
-  // Phillips cross: two dark bars slightly proud of the dome.
+  // Phillips cross: two dark bars slightly proud of the dome. Merged into the
+  // body with a dark vertex tint so a screw is a single draw call.
   const barA = new THREE.BoxGeometry(0.3, 0.07, 0.05);
   const barB = new THREE.BoxGeometry(0.07, 0.3, 0.05);
-  const cross = mergeGeometries([barA, barB], false) ?? barA;
-  cross.translate(0, 0, 0.185);
-  barA.dispose();
-  if (cross !== barA) barB.dispose();
+  barA.translate(0, 0, 0.185);
+  barB.translate(0, 0, 0.185);
+  for (const g of [shaft, rim, dome]) tintGeometry(g, 1, 1, 1);
+  for (const g of [barA, barB]) tintGeometry(g, 0.16, 0.16, 0.18);
+  const body = mergeGeometries([shaft, rim, dome, barA, barB], false) ?? dome;
+  for (const g of [shaft, rim, barA, barB]) g.dispose();
+  if (body !== dome) dome.dispose();
+  body.computeVertexNormals();
 
   const hit = new THREE.SphereGeometry(SCREW_HIT_R, 10, 8);
   hit.translate(0, 0, 0.1);
@@ -82,7 +90,7 @@ function buildGeometries(): ScrewGeometryCache {
   const targetRing = new THREE.RingGeometry(r + 0.1, r + 0.145, 40);
   const mystery = new THREE.CircleGeometry(r * 0.72, 24);
   mystery.translate(0, 0, SCREW_HEAD_TOP + 0.012);
-  return { body, cross, hit, hintRing, targetRing, mystery };
+  return { body, hit, hintRing, targetRing, mystery };
 }
 
 function makeMysteryTexture(): THREE.Texture {
@@ -123,6 +131,7 @@ export function screwMaterial(color: ScrewColor | 'mystery'): THREE.MeshStandard
         roughness: 0.55,
         metalness: 0.45,
         envMapIntensity: 0.8,
+        vertexColors: true,
       });
     } else {
       m = new THREE.MeshStandardMaterial({
@@ -130,6 +139,7 @@ export function screwMaterial(color: ScrewColor | 'mystery'): THREE.MeshStandard
         roughness: 0.32,
         metalness: 0.6,
         envMapIntensity: 1.0,
+        vertexColors: true,
       });
     }
     materialCache.set(color, m);
@@ -145,13 +155,13 @@ export function flashMaterial(): THREE.MeshStandardMaterial {
       emissiveIntensity: 0.9,
       roughness: 0.3,
       metalness: 0.3,
+      vertexColors: true,
     });
   }
   return flashMaterialCached;
 }
 
 function sharedMaterials() {
-  crossMaterial ??= new THREE.MeshStandardMaterial({ color: 0x23252c, roughness: 0.6, metalness: 0.4 });
   hitMaterial ??= new THREE.MeshBasicMaterial({ visible: false });
   hintMaterial ??= new THREE.MeshBasicMaterial({
     color: 0xfff2a0,
@@ -174,7 +184,7 @@ function sharedMaterials() {
     transparent: true,
     depthWrite: false,
   });
-  return { crossMaterial, hitMaterial, hintMaterial, targetMaterial, mysteryMaterial };
+  return { hitMaterial, hintMaterial, targetMaterial, mysteryMaterial };
 }
 
 export function hintRingMaterial(): THREE.MeshBasicMaterial {
@@ -200,10 +210,6 @@ export function createScrewVisual(init: ScrewVisualInit): ScrewVisual {
   body.castShadow = true;
   body.receiveShadow = false;
   group.add(body);
-
-  const cross = new THREE.Mesh(g.cross, mats.crossMaterial);
-  cross.visible = init.revealed;
-  group.add(cross);
 
   const mystery = new THREE.Mesh(g.mystery, mats.mysteryMaterial);
   mystery.visible = !init.revealed;
@@ -235,7 +241,6 @@ export function createScrewVisual(init: ScrewVisualInit): ScrewVisual {
     location: init.location,
     group,
     body,
-    cross,
     mystery,
     hit,
     hintRing,
@@ -257,7 +262,6 @@ export function applyScrewColor(v: ScrewVisual, color: ScrewColor, revealed: boo
   v.color = color;
   v.revealed = revealed;
   v.body.material = screwMaterial(revealed ? color : 'mystery');
-  v.cross.visible = revealed;
   v.mystery.visible = !revealed;
 }
 
@@ -274,8 +278,6 @@ export function disposeScrewCaches(): void {
   }
   for (const m of materialCache.values()) m.dispose();
   materialCache.clear();
-  crossMaterial?.dispose();
-  crossMaterial = null;
   hitMaterial?.dispose();
   hitMaterial = null;
   hintMaterial?.dispose();
