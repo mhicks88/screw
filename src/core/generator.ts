@@ -388,30 +388,30 @@ export function generateLevel(level: number): LevelDef {
     if (list.length > KEEP) list.length = KEEP;
   };
 
-  for (let attempt = 0; attempt < budget; attempt++) {
+  const tryAttempt = (attempt: number): void => {
     const seed = hashSeed(level, attempt);
     const rng = new Rng(seed);
     const target = params.screws;
 
     const built = buildAssembly(params, rng);
-    if (built.panels.length < 2) continue;
+    if (built.panels.length < 2) return;
     const want = Math.floor(Math.min(built.screws.length, target) / BOX_CAPACITY) * BOX_CAPACITY;
-    if (want < 9) continue;
+    if (want < 9) return;
     const asm = trimScrews(built, want, rng);
     const count = asm.screws.length;
-    if (count % BOX_CAPACITY !== 0 || count < target * 0.5) continue;
+    if (count % BOX_CAPACITY !== 0 || count < target * 0.5) return;
 
     const colors = assignColors(asm, params, rng, params.colorClumping);
     const def = buildDef(level, seed, params, asm, colors, rng);
     const sim = simulateWithLazyQueue(def, seed);
-    if (sim.outcome !== 'won') continue;
-    if (sim.queue.length !== count / BOX_CAPACITY) continue;
+    if (sim.outcome !== 'won') return;
+    if (sim.queue.length !== count / BOX_CAPACITY) return;
     const final: LevelDef = { ...def, boxQueue: sim.queue };
 
     const stats = statsFrom(final, sim);
     // Opening with two boxes of the same colour narrows the level to one front
     // no matter how many panels are reachable — never ship that.
-    if (stats.startBoxColors < targets.startBoxColors) continue;
+    if (stats.startBoxColors < targets.startBoxColors) return;
     const c: Candidate = { def: final, stats, score: quality(stats, targets, params), attempt };
     const rightSize = count >= target * 0.92
       && stats.shells >= params.shells
@@ -425,6 +425,22 @@ export function generateLevel(level: number): LevelDef {
       && stats.panels >= params.panels * 0.6;
     const plays = meetsTargets(stats, targets);
     keep(rightSize ? (plays ? tier1 : tier3) : (plays && nearSize ? tier2 : tier4), c);
+  };
+
+  for (let attempt = 0; attempt < budget; attempt++) tryAttempt(attempt);
+  /*
+   * Nothing met every criterion inside the budget. Falling back here is what
+   * left ~12% of the 351-700 band reaching only two screws from some viewing
+   * angle against a floor of three — playable, but not what the band promises.
+   * Spend a second round ONLY on those levels: the common case keeps its
+   * timing, and the stubborn ones get the attempts they actually need.
+   */
+  if (!tier1.length && !tier2.length) {
+    const extra = Math.round(budget * 1.5);
+    for (let attempt = budget; attempt < budget + extra; attempt++) {
+      tryAttempt(attempt);
+      if (tier1.length) break;
+    }
   }
 
   // Prefer a level that meets every criterion; fall back to the best seen.
