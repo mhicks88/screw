@@ -23,7 +23,7 @@ import { BOX_HEIGHT, BOX_Y, OFFSCREEN_Y, boxPositionsX, trayPositionsX, trayWidt
  */
 export function detachScrew(w: World, s: ScrewVisual): THREE.Group {
   w.rig.assemblyRoot.updateMatrixWorld(true);
-  return w.field.detach(s, w.rig.fixedRoot, w.rig.assemblyRoot.matrixWorld);
+  return w.field.detach(s, w.rig.fixedRoot, w.rig.assemblyRoot);
 }
 
 export interface FlightOptions {
@@ -49,7 +49,11 @@ export async function flyScrew(
   if (opts.delay) await w.tweens.delay(opts.delay);
   if (!isAlive(w, gen)) return;
   if (g.parent !== w.rig.fixedRoot) w.rig.fixedRoot.attach(g);
-  g.scale.setScalar(1);
+  // A seated screw is drawn at the level's zoom; the boxes and the tray are
+  // fixed world furniture at zoom 1, so the screw eases back to its true size
+  // on the way over (imperceptible at zoom 1, which is most levels).
+  const startScale = opts.from === 'plate' ? w.rig.assemblyScale : 1;
+  g.scale.setScalar(startScale);
 
   const start = g.position.clone();
   const q0 = g.quaternion.clone();
@@ -90,6 +94,8 @@ export async function flyScrew(
       p1.lerpVectors(p0, p2, 0.5);
       p1.z = Math.max(p0.z, p2.z) + 2.3;
       quadBezier(p0, p1, p2, e, g.position);
+      const k = startScale + (1 - startScale) * Math.min(1, e * 1.25);
+      g.scale.setScalar(k);
       qFlat.setFromAxisAngle(xAxis, Math.sin(e * Math.PI) * 0.3 * dirSign);
       qAir.slerpQuaternions(q1, qFlat, Math.min(1, e * 1.4));
       g.quaternion.copy(qAir);
@@ -152,6 +158,9 @@ export async function dropPanel(w: World, pv: PanelVisual, delay = 0): Promise<v
 
   const p0 = m.position.clone();
   const q0 = m.quaternion.clone();
+  // `attach` preserved the level's zoom in the mesh's own scale; every scale
+  // tween below is relative to it.
+  const baseScale = m.scale.x;
   const tumbleAxis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
   const tumble = new THREE.Quaternion();
   m.renderOrder = 5;
@@ -162,8 +171,7 @@ export async function dropPanel(w: World, pv: PanelVisual, delay = 0): Promise<v
     ease: Easing.outQuad,
     onUpdate: (e) => {
       m.position.copy(p0).addScaledVector(push, 0.3 * e);
-      const k = 1 + 0.03 * e;
-      m.scale.set(k, k, k);
+      m.scale.setScalar(baseScale * (1 + 0.03 * e));
     },
   });
   if (!isAlive(w, gen)) return;

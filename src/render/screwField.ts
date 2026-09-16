@@ -299,12 +299,16 @@ export class ScrewField {
    * WORLD space, because the boxes and the tray are fixed there and the player
    * may keep spinning the assembly mid-flight. Idempotent.
    */
-  detach(s: ScrewVisual, worldRoot: THREE.Object3D, assemblyMatrix: THREE.Matrix4): THREE.Group {
+  detach(s: ScrewVisual, worldRoot: THREE.Object3D, assembly: THREE.Object3D): THREE.Group {
     if (s.group) return s.group;
-    // Freeze the current pose into world space before the parent changes.
-    s.pos.applyMatrix4(assemblyMatrix);
-    s.worldQuat.setFromRotationMatrix(assemblyMatrix).multiply(this.spunQuat(s));
+    // Freeze the current pose into world space before the parent changes. The
+    // rotation is taken from the assembly's quaternion rather than from its
+    // world matrix, because that matrix carries the per-level zoom and a scaled
+    // basis does not convert to a quaternion.
+    s.pos.applyMatrix4(assembly.matrixWorld);
+    s.worldQuat.copy(assembly.quaternion).multiply(this.spunQuat(s));
     const group = buildLooseScrew(s);
+    group.scale.setScalar(s.scale * assembly.scale.x);
     worldRoot.add(group);
     this.dirty = true;
     this.flush();

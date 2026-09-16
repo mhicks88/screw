@@ -147,9 +147,25 @@ export class SceneRig {
     this.frame();
   }
 
-  /** Projected radius of the assembly in CSS pixels (drag gain, affordance ring). */
+  /**
+   * Projected radius of the FRAME the assembly is fitted to, in CSS pixels.
+   *
+   * Every level is zoomed so its own bounding sphere fills ASSEMBLY_RADIUS
+   * (see layout.ts), so this is also the projected radius of the object itself
+   * whatever level it is — which is exactly what the drag gain needs.
+   */
   assemblyPixelRadius(): number {
     return this.radiusPx;
+  }
+
+  /** Uniform zoom applied to the assembly so small levels still fill the frame. */
+  get assemblyScale(): number {
+    return this.assemblyRoot.scale.x;
+  }
+
+  setAssemblyScale(k: number): void {
+    this.assemblyRoot.scale.setScalar(k);
+    this.assemblyRoot.updateMatrixWorld(true);
   }
 
   render(): void {

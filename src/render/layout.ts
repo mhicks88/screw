@@ -12,6 +12,27 @@
 /** CONTRACT_V3 §1: the assembly fits inside this radius so it stays framed from any angle. */
 export const ASSEMBLY_RADIUS = 3.0;
 
+/**
+ * Per-level zoom (see `GameRenderer.loadLevel`).
+ *
+ * ASSEMBLY_RADIUS is the radius a level MAY use, not the radius it does use:
+ * level 1 is a 1.2-unit object and level 1000 a 2.7-unit one, so framing the
+ * constant leaves the first level marooned in an empty screen.
+ *
+ * The camera cannot simply come closer, because what pins the framing is the
+ * box row at y = +5.3 and the tray row at y = -5.3, not the object — moving in
+ * would push them off screen. So the OBJECT is scaled up instead: its own
+ * bounding sphere is zoomed to fill ASSEMBLY_RADIUS, the camera, lights, boxes
+ * and tray never move, and every level ends up the same apparent size. That
+ * also keeps the drag gain honest, since the gain is calibrated against the
+ * apparent radius.
+ */
+export const MAX_ASSEMBLY_ZOOM = 2.6;
+/** Never zoom out: a full-size level is framed exactly as it is today. */
+export const MIN_ASSEMBLY_ZOOM = 1;
+/** Guard against a degenerate (near-zero) level radius. */
+export const MIN_LEVEL_RADIUS = 0.4;
+
 /** Chamfer applied to every extruded panel (see panelMesh.ts). */
 export const PANEL_BEVEL = 0.018;
 

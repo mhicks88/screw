@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { GameEvent, GameSnapshot, ScrewDef } from '../core/types';
+import type { GameEvent, GameSnapshot, LevelDef, ScrewDef } from '../core/types';
 import { SceneRig } from './scene';
 import { TweenManager } from './tween';
 import { Effects } from './effects';
@@ -15,7 +15,14 @@ import { createScrewVisual, disposeScrewCaches, disposeScrewVisual } from './scr
 import { detachScrew } from './animations';
 import { createBoxVisual, disposeBoxCaches, disposeBoxVisual } from './boxMesh';
 import { createTrayVisual, disposeTrayCaches, disposeTrayVisual } from './trayMesh';
-import { boxPositionsX } from './layout';
+import {
+  ASSEMBLY_RADIUS,
+  MAX_ASSEMBLY_ZOOM,
+  MIN_ASSEMBLY_ZOOM,
+  MIN_LEVEL_RADIUS,
+  boxPositionsX,
+} from './layout';
+import { SCREW_HEAD_TOP } from './screwMesh';
 import type { PanelRayTarget } from './occlusion';
 import { blockDepth, buildRayTargets } from './occlusion';
 
@@ -31,6 +38,47 @@ export interface RendererOptions {
 const START_ORIENTATION = new THREE.Quaternion().setFromEuler(
   new THREE.Euler(THREE.MathUtils.degToRad(13), THREE.MathUtils.degToRad(-27), 0, 'YXZ'),
 );
+
+/**
+ * Radius of the level's OWN bounding sphere, from real geometry: every panel
+ * corner on both faces, plus every screw head standing proud of its face.
+ *
+ * Levels vary a lot — about 1.2 units at level 1 against 2.7 at level 1000 —
+ * and the renderer zooms each one to fill the frame (layout.ts). Measured from
+ * the level definition, so it is the INITIAL size: the object shrinks as panels
+ * come off, and re-zooming mid-play would both disorient the player and drift
+ * the drag gain under their finger.
+ */
+function levelBoundingRadius(level: LevelDef): number {
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  let maxSq = 0;
+  for (const panel of level.panels) {
+    q.set(panel.rotation.x, panel.rotation.y, panel.rotation.z, panel.rotation.w);
+    for (const pt of panel.shape.outline) {
+      for (const z of [0, panel.thickness]) {
+        p.set(pt.x, pt.y, z).applyQuaternion(q);
+        p.x += panel.position.x;
+        p.y += panel.position.y;
+        p.z += panel.position.z;
+        maxSq = Math.max(maxSq, p.lengthSq());
+      }
+    }
+  }
+  let max = Math.sqrt(maxSq);
+  for (const screw of level.screws) {
+    // The head stands SCREW_HEAD_TOP proud along the axis, which on an outward
+    // face is the outermost thing on the object.
+    const r =
+      Math.hypot(
+        screw.position.x + screw.axis.x * SCREW_HEAD_TOP,
+        screw.position.y + screw.axis.y * SCREW_HEAD_TOP,
+        screw.position.z + screw.axis.z * SCREW_HEAD_TOP,
+      );
+    if (r > max) max = r;
+  }
+  return max;
+}
 
 /**
  * three.js view of the game. Sees only snapshots (loadLevel) and events
@@ -75,6 +123,8 @@ export class GameRenderer {
   private readonly cameraLocal = new THREE.Vector3();
   private readonly invQuat = new THREE.Quaternion();
   private facingDirty = true;
+  /** Radius of the current level's own bounding sphere (before the zoom). */
+  private levelRadius = ASSEMBLY_RADIUS;
   /** Ray targets for the drill x-ray depth (occlusion.ts). */
   private rayTargets: PanelRayTarget[] = [];
   private coverDirty = true;
@@ -138,6 +188,19 @@ export class GameRenderer {
     const w = this.world;
     this.clearLevel();
     const level = snapshot.level;
+
+    // Fit this level to the frame before anything is built: the zoom is part of
+    // the assembly's world matrix, so screws parked in the tray or a box below
+    // need it already set when they are placed.
+    const radius = levelBoundingRadius(level);
+    const zoom = THREE.MathUtils.clamp(
+      ASSEMBLY_RADIUS / Math.max(MIN_LEVEL_RADIUS, radius),
+      MIN_ASSEMBLY_ZOOM,
+      MAX_ASSEMBLY_ZOOM,
+    );
+    this.levelRadius = radius;
+    this.rig.setAssemblyScale(zoom);
+    this.affordance.setRadius(radius * zoom);
 
     const shellOf = new Map<number, number>();
     for (const p of level.panels) shellOf.set(p.id, p.shell);
@@ -210,6 +273,8 @@ export class GameRenderer {
       sv.worldQuat.identity();
       g.position.copy(target);
       g.quaternion.identity();
+      // Already home: boxes and the tray are world furniture, at zoom 1.
+      g.scale.setScalar(1);
     }
 
     this.rayTargets = buildRayTargets(level.panels);
@@ -307,6 +372,7 @@ export class GameRenderer {
     w.rig.fixedRoot.clear();
     this.pressedId = null;
     this.hinting = false;
+    this.levelRadius = ASSEMBLY_RADIUS;
     this.rayTargets = [];
     this.coverDirty = true;
   }
@@ -344,7 +410,12 @@ export class GameRenderer {
   private updateFacing(): void {
     const cam = this.rig.camera;
     this.invQuat.copy(this.rig.assemblyRoot.quaternion).invert();
-    this.cameraLocal.copy(cam.position).applyQuaternion(this.invQuat);
+    // Screw positions are in unzoomed assembly space, so the camera has to come
+    // all the way in: un-rotate it, then undo the level's zoom.
+    this.cameraLocal
+      .copy(cam.position)
+      .applyQuaternion(this.invQuat)
+      .divideScalar(this.rig.assemblyScale || 1);
     this.field.updateFacing(this.cameraLocal);
     this.facingDirty = false;
   }
@@ -392,6 +463,7 @@ export class GameRenderer {
     this.affordance.update(
       this.field.offscreenRemovable(),
       this.rig.assemblyRoot.quaternion,
+      this.rig.assemblyScale,
       this.field.seatedCount(),
       this.hinting,
       dt || 16,

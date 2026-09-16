@@ -19,8 +19,8 @@ import { ASSEMBLY_RADIUS } from './layout';
 
 /** Angular bins around the silhouette. 14 ≈ 26° apart: readable, never a dial. */
 const BINS = 14;
-/** Ring radius, just outside the assembly's bounding sphere. */
-const RING_R = ASSEMBLY_RADIUS + 0.34;
+/** Clearance between the object's silhouette and the ring of markers. */
+const RING_GAP = 0.34;
 
 const DASH_LEN = 0.44;
 const DASH_W = 0.085;
@@ -62,6 +62,8 @@ export class RotateAffordance {
   private readonly m = new THREE.Matrix4();
   private readonly color = new THREE.Color();
   private enabled = true;
+  /** World radius of the current level's object, after its zoom. */
+  private objectRadius = ASSEMBLY_RADIUS;
   /** Smoothed per-bin strength so markers fade rather than blink. */
   private readonly level = new Float32Array(BINS);
 
@@ -85,6 +87,11 @@ export class RotateAffordance {
     root.add(this.mesh);
   }
 
+  /** Follow the level's own size, so the markers hug whatever is on screen. */
+  setRadius(worldRadius: number): void {
+    this.objectRadius = Math.max(1, worldRadius);
+  }
+
   setEnabled(on: boolean): void {
     this.enabled = on;
     if (!on) {
@@ -102,12 +109,14 @@ export class RotateAffordance {
   /**
    * @param away      removable screws whose axis points away from the camera
    * @param assemblyQ current assembly rotation (screw homes are assembly-space)
+   * @param zoom      the level's uniform zoom (screw homes are unzoomed)
    * @param frontCount how many screws ARE reachable facing the player
    * @param boost     brighten it anyway (the player asked for a hint)
    */
   update(
     away: readonly ScrewVisual[],
     assemblyQ: THREE.Quaternion,
+    zoom: number,
     frontCount: number,
     boost: boolean,
     dtMs: number,
@@ -125,10 +134,11 @@ export class RotateAffordance {
       // Where this screw lies on screen, as a direction from the object's
       // centre: mostly its position, nudged by the way it points so that a
       // screw on the exact back of the object still picks a side.
-      this.p.copy(s.home).applyQuaternion(assemblyQ);
+      this.p.copy(s.home).multiplyScalar(zoom).applyQuaternion(assemblyQ);
       this.a.copy(s.axis).applyQuaternion(assemblyQ);
-      const x = this.p.dot(this.right) + 0.55 * ASSEMBLY_RADIUS * this.a.dot(this.right);
-      const y = this.p.dot(this.up) + 0.55 * ASSEMBLY_RADIUS * this.a.dot(this.up);
+      const lean = 0.55 * this.objectRadius;
+      const x = this.p.dot(this.right) + lean * this.a.dot(this.right);
+      const y = this.p.dot(this.up) + lean * this.a.dot(this.up);
       if (x * x + y * y < 1e-4) continue;
       let bin = Math.floor((Math.atan2(y, x) / (Math.PI * 2)) * BINS + BINS) % BINS;
       if (bin < 0) bin += BINS;
@@ -155,12 +165,13 @@ export class RotateAffordance {
       const theta = ((i + 0.5) / BINS) * Math.PI * 2;
       const c = Math.cos(theta);
       const sn = Math.sin(theta);
+      const ringR = this.objectRadius + RING_GAP;
       this.pos
         .set(0, 0, 0)
-        .addScaledVector(this.right, c * RING_R)
-        .addScaledVector(this.up, sn * RING_R)
+        .addScaledVector(this.right, c * ringR)
+        .addScaledVector(this.up, sn * ringR)
         // Pull it toward the camera so it always clears the silhouette.
-        .addScaledVector(this.fwd, ASSEMBLY_RADIUS * 0.75);
+        .addScaledVector(this.fwd, this.objectRadius * 0.75);
       // Dash is authored in local XY; turn it to the bin angle, then into the
       // camera's plane. The camera never moves, so this is the same plane every
       // frame — the object is what turns.

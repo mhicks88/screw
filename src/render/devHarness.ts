@@ -113,6 +113,7 @@ interface RendererInternals {
     assemblyRoot: THREE.Group;
     fixedRoot: THREE.Group;
     assemblyPixelRadius(): number;
+    assemblyScale: number;
   };
   input: { pick(x: number, y: number): number | null };
   field: FieldInternals;
@@ -487,6 +488,53 @@ async function main(): Promise<void> {
 
     radiusPx: () => internals.rig.assemblyPixelRadius(),
 
+    /** The level's own size and the zoom applied to fit it to the frame. */
+    fit: () => {
+      const lvl = level!;
+      let maxSq = 0;
+      for (const p of lvl.panels) {
+        const q = new THREE.Quaternion(p.rotation.x, p.rotation.y, p.rotation.z, p.rotation.w);
+        for (const pt of p.shape.outline) {
+          for (const z of [0, p.thickness]) {
+            const v = new THREE.Vector3(pt.x, pt.y, z).applyQuaternion(q);
+            v.x += p.position.x;
+            v.y += p.position.y;
+            v.z += p.position.z;
+            maxSq = Math.max(maxSq, v.lengthSq());
+          }
+        }
+      }
+      const screwR = Math.max(
+        0,
+        ...lvl.screws.map((s) => Math.hypot(s.position.x, s.position.y, s.position.z)),
+      );
+      const zoom = internals.rig.assemblyScale;
+      const radius = Math.sqrt(maxSq);
+      return {
+        levelRadius: Math.round(radius * 100) / 100,
+        maxScrewRadius: Math.round(screwR * 100) / 100,
+        zoom: Math.round(zoom * 1000) / 1000,
+        /** How much of the frame the object fills, linearly. */
+        frameFill: Math.round((radius * zoom) / 3.0 * 1000) / 1000,
+        radiusPx: Math.round(internals.rig.assemblyPixelRadius()),
+      };
+    },
+
+    /**
+     * Degrees of rotation per 100 px of drag — the number that has to match
+     * across levels, or a small level would spin far faster under the finger.
+     */
+    dragDegreesPer100px: () => {
+      const before = internals.orbit.quaternion.clone();
+      internals.orbit.begin();
+      for (let i = 0; i < 10; i++) internals.orbit.drag(10, 0, 16);
+      internals.orbit.end();
+      const after = internals.orbit.quaternion.clone();
+      const deg = (2 * Math.acos(Math.min(1, Math.abs(before.dot(after))))) * (180 / Math.PI);
+      internals.orbit.reset(before);
+      return Math.round(deg * 100) / 100;
+    },
+
     /**
      * CONTRACT_V3 §6, the property v2 established and v3 must keep: when the
      * board is idle the renderer's TAPPABLE set is exactly the core's
@@ -499,7 +547,11 @@ async function main(): Promise<void> {
       const cam = internals.rig.camera;
       internals.rig.assemblyRoot.updateMatrixWorld(true);
       const inv = internals.rig.assemblyRoot.quaternion.clone().invert();
-      const camLocal = cam.position.clone().applyQuaternion(inv);
+      // Screw defs are in unzoomed assembly space; undo the level's zoom too.
+      const camLocal = cam.position
+        .clone()
+        .applyQuaternion(inv)
+        .divideScalar(internals.rig.assemblyScale || 1);
       const defs = new Map(lvl.screws.map((d) => [d.id, d]));
       const removable = new Set(game.reachableScrewIds());
       const expected: number[] = [];
