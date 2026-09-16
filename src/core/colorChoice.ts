@@ -60,18 +60,27 @@ export function rankByNeed(needs: Map<ScrewColor, ColorNeed>, candidates: readon
  * must spawn, choose the colour most present in the tray, then among reachable
  * screws, then any colour that still has unassigned screws. Returns undefined
  * when every remaining screw already has a box.
+ *
+ * The simultaneously active boxes must show DISTINCT colours whenever the
+ * remaining pool still offers a choice. Four boxes that all want red give the
+ * player one front, not four, however many plates are reachable — which defeats
+ * the point of CONTRACT_V2 §5. A duplicate is therefore only allowed when every
+ * colour that still needs a box is already on the board (late in a level, or
+ * when one colour needs more boxes than there are free positions).
  */
 export function chooseLazyBoxColor(game: Game): ScrewColor | undefined {
   const needs = colorNeeds(game);
-  const candidates = ALL_COLORS.filter((c) => needs.get(c)!.unassigned > 0);
+  let candidates = ALL_COLORS.filter((c) => needs.get(c)!.unassigned > 0);
   if (candidates.length === 0) return undefined;
   const active = new Set(game.peekBoxes().map((b) => b.color));
+  const fresh = candidates.filter((c) => !active.has(c));
+  if (fresh.length > 0) candidates = fresh;
   // Prefer a colour whose box can be completed from what is available right
   // now (tray first, then reachable), then tray relief, then future supply.
   const score = (c: ScrewColor) => {
     const n = needs.get(c)!;
     const available = Math.min(BOX_CAPACITY, n.tray + n.reachable);
-    return available * 10 + n.tray * 3 + n.reachable + n.onPlate * 0.05 - (active.has(c) ? 4 : 0);
+    return available * 10 + n.tray * 3 + n.reachable + n.onPlate * 0.05;
   };
   let best = candidates[0];
   let bestScore = -Infinity;

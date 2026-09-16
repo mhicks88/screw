@@ -3,6 +3,7 @@ import { BOX_Y, OFFSCREEN_Y, boxPositionsX } from './layout';
 import type { World } from './world';
 import { boxSlotWorld, trayTargetWorld } from './world';
 import { createBoxVisual } from './boxMesh';
+import { disposeScrewVisual } from './screwMesh';
 import {
   completeBox,
   dropPlate,
@@ -125,10 +126,20 @@ export class EventPlayer {
         case 'screwToBox': {
           const s = w.screws.get(ev.screwId);
           const b = w.boxes.get(ev.boxId);
-          if (!s || !b) break;
+          if (!s) break;
           if (ev.from === 'tray') {
             const idx = w.traySlots.indexOf(s.id);
             if (idx >= 0) w.traySlots[idx] = null;
+          }
+          if (!b) {
+            // The target box has no visual (it was disposed, or the event
+            // stream skipped its spawn). Never leave the screw parked in the
+            // tray hole it logically just left — retire it instead.
+            s.location = 'box';
+            disposeScrewVisual(s);
+            w.field.forget(s);
+            w.screws.delete(s.id);
+            break;
           }
           const from = s.location === 'tray' ? 'tray' : ev.from;
           s.location = 'box';

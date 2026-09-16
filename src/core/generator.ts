@@ -103,6 +103,10 @@ export interface LevelStats {
   avgFronts: number;
   /** Longest stretch of consecutive steps with fewer than 3 reachable screws. */
   maxChokeRun: number;
+  /** Distinct colours among the active boxes at the very start of the level. */
+  startBoxColors: number;
+  /** Mean number of distinct colours among the active boxes over the play-through. */
+  avgBoxColors: number;
   /** Taps in the proven winning line (one per screw). */
   steps: number;
 }
@@ -112,6 +116,8 @@ export interface NonLinearityTargets {
   minReachable: number;
   avgFronts: number;
   maxChokeRun: number;
+  /** Distinct colours the starting boxes must show (§5: N boxes, N fronts). */
+  startBoxColors: number;
 }
 
 /**
@@ -119,13 +125,17 @@ export interface NonLinearityTargets {
  * ramp down, because a 12-screw tutorial cannot offer 8 reachable screws.
  */
 export function nonLinearityTargets(level: number): NonLinearityTargets {
-  if (level <= 5) return { avgReachable: 0, minReachable: 1, avgFronts: 0, maxChokeRun: 999 };
+  const params = difficultyFor(level);
+  // Every starting box must want a different colour whenever the palette allows.
+  const startBoxColors = Math.min(params.activeBoxCount, params.colors);
+  if (level <= 5) return { avgReachable: 0, minReachable: 1, avgFronts: 0, maxChokeRun: 999, startBoxColors };
   const s = Math.min(1, (level - 5) / 45);
   return {
     avgReachable: 3 + 5 * s,
     minReachable: s >= 1 ? 3 : s > 0.5 ? 2 : 1,
     avgFronts: 1.2 + 1.8 * s,
     maxChokeRun: Math.round(10 - 7 * s),
+    startBoxColors,
   };
 }
 
@@ -134,6 +144,7 @@ const TAIL = 5; // the last few moves of any level are necessarily forced
 function statsFrom(def: LevelDef, res: BotResult): LevelStats {
   const reach = res.reachPerStep ?? [];
   const fronts = res.frontsPerStep ?? [];
+  const boxColors = res.boxColorsPerStep ?? [];
   const body = reach.length > TAIL ? reach.slice(0, reach.length - TAIL) : reach.slice(0, 1);
   const mean = (a: number[]) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
   let run = 0, maxRun = 0;
@@ -154,6 +165,8 @@ function statsFrom(def: LevelDef, res: BotResult): LevelStats {
     minReachable: body.length ? Math.min(...body) : 0,
     avgFronts: mean(fronts),
     maxChokeRun: maxRun,
+    startBoxColors: boxColors.length ? boxColors[0] : 0,
+    avgBoxColors: mean(boxColors),
     steps: res.steps,
   };
 }
@@ -180,7 +193,8 @@ function meetsTargets(stats: LevelStats, targets: NonLinearityTargets): boolean 
   return stats.avgReachable >= targets.avgReachable
     && stats.minReachable >= targets.minReachable
     && stats.avgFronts >= targets.avgFronts
-    && stats.maxChokeRun < Math.max(4, targets.maxChokeRun + 1);
+    && stats.maxChokeRun < Math.max(4, targets.maxChokeRun + 1)
+    && stats.startBoxColors >= targets.startBoxColors;
 }
 
 /* ------------------------------------------------------- difficulty gate */
@@ -248,6 +262,7 @@ function quality(stats: LevelStats, t: NonLinearityTargets, params: DifficultyPa
   q += 0.5 * Math.min(1, stats.plates / Math.max(2, params.plates));
   q -= 3.0 * Math.max(0, stats.bottomLayerFraction - 0.35);
   q -= 0.35 * Math.max(0, stats.peakReachable - 28);
+  q -= 2.0 * Math.max(0, t.startBoxColors - stats.startBoxColors);
   return q;
 }
 
@@ -305,6 +320,9 @@ export function generateLevel(level: number): LevelDef {
     const final: LevelDef = { ...def, boxQueue: sim.queue };
 
     const stats = statsFrom(final, sim);
+    // Opening with two boxes of the same colour narrows the level to one front
+    // no matter how many plates are reachable — never ship that.
+    if (stats.startBoxColors < targets.startBoxColors) continue;
     const c: Candidate = { def: final, stats, score: quality(stats, targets, params), attempt };
     const rightSize = count >= target * 0.92 && stats.layers >= params.layers - 1;
     keep(rightSize ? (meetsTargets(stats, targets) ? tier1 : tier2) : tier3, c);

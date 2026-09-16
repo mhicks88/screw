@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { GameEvent, GameSnapshot, PlateDef, ScrewDef } from '../core/types';
-import { plateContainsWorldPoint } from '../core/geometry';
+import { plateContainsWorldPoint, plateEdgeDistance } from '../core/geometry';
 import { SceneRig } from './scene';
 import { TweenManager } from './tween';
 import { Effects } from './effects';
@@ -10,10 +10,11 @@ import type { World } from './world';
 import { boxSlotWorld, trayTargetWorld } from './world';
 import { createPlateVisual, disposePlateVisual, plateColorFor } from './plateMesh';
 import { ScrewField } from './screwField';
+import type { ScrewVisual } from './screwMesh';
 import { createScrewVisual, disposeScrewCaches, disposeScrewVisual } from './screwMesh';
 import { createBoxVisual, disposeBoxCaches, disposeBoxVisual } from './boxMesh';
 import { createTrayVisual, disposeTrayCaches, disposeTrayVisual } from './trayMesh';
-import { boxPositionsX, plateTopZ } from './layout';
+import { SCREW_HEAD_R, boxPositionsX, plateTopZ } from './layout';
 
 export interface RendererOptions {
   onScrewTap: (screwId: number) => void;
@@ -297,9 +298,38 @@ export class GameRenderer {
       if (forced === false) c = 0;
       else if (forced === true && c === 0) c = 1;
       s.coverCount = c;
+      if (c === 0) this.seatScrew(s, live);
     }
     this.field.markDirty();
     this.retargetDepthTint(live);
+  }
+
+  /**
+   * Lift a reachable screw clear of any higher plate whose *edge* cuts through
+   * its head.
+   *
+   * The screw's centre is what decides reachability, so a screw can be legally
+   * tappable while a plate one or more layers up covers most of its head. With
+   * only 0.02 units of air per layer that head would be all but swallowed — the
+   * player sees a bare plate where the game says a screw is. Seating it on top
+   * of the highest plate that clips it costs a few pixels of apparent height and
+   * keeps every tappable screw visible.
+   */
+  private seatScrew(s: ScrewVisual, live: PlateDef[]): void {
+    let z = plateTopZ(s.layer);
+    for (const p of live) {
+      if (p.layer <= s.layer) continue;
+      if (plateEdgeDistance(p, s.home.x, s.home.y) < SCREW_HEAD_R + 0.02) {
+        z = Math.max(z, plateTopZ(p.layer) + 0.006);
+      }
+    }
+    if (Math.abs(z - s.home.z) < 1e-6) return;
+    const wasAtHome = Math.abs(s.pos.z - s.home.z) < 1e-6;
+    s.home.z = z;
+    if (wasAtHome && !s.group) {
+      s.pos.z = z;
+      this.field.setPose(s);
+    }
   }
 
   /**

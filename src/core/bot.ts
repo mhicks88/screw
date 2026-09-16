@@ -34,6 +34,8 @@ export interface BotResult {
   frontsPerStep?: number[];
   /** With `trace`: the screw ids tapped, in order (a replayable winning line). */
   picks?: number[];
+  /** With `trace`: distinct colours among the simultaneously active boxes. */
+  boxColorsPerStep?: number[];
 }
 
 export interface BotOptions {
@@ -58,8 +60,11 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
   const reachPerStep: number[] | undefined = opts.trace ? [] : undefined;
   const frontsPerStep: number[] | undefined = opts.trace ? [] : undefined;
   const picks: number[] | undefined = opts.trace ? [] : undefined;
-  const finish = (outcome: BotResult['outcome']): BotResult =>
-    ({ outcome, steps, trayUses, peakTray, ...(opts.trace ? { reachPerStep, frontsPerStep, picks } : {}) });
+  const boxColorsPerStep: number[] | undefined = opts.trace ? [] : undefined;
+  const finish = (outcome: BotResult['outcome']): BotResult => ({
+    outcome, steps, trayUses, peakTray,
+    ...(opts.trace ? { reachPerStep, frontsPerStep, picks, boxColorsPerStep } : {}),
+  });
   const level = game.level;
   const plateById = new Map(level.plates.map((p) => [p.id, p]));
   const coverMap = game.coverageMap();
@@ -70,13 +75,14 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
     if (reachable.length === 0) return finish('stuck');
     const screws = game.peekScrews();
     const byId = new Map(screws.map((s) => [s.id, s]));
-    if (reachPerStep && frontsPerStep) {
+    const boxes = game.peekBoxes();
+    if (reachPerStep && frontsPerStep && boxColorsPerStep) {
       reachPerStep.push(reachable.length);
       const fronts = new Set<number>();
       for (const id of reachable) fronts.add(byId.get(id)!.plateId);
       frontsPerStep.push(fronts.size);
+      boxColorsPerStep.push(new Set(boxes.map((b) => b.color)).size);
     }
-    const boxes = game.peekBoxes();
     const boxRoom = new Map<ScrewColor, number>();
     for (const b of boxes) if (b.screws.length < BOX_CAPACITY) boxRoom.set(b.color, Math.max(boxRoom.get(b.color) ?? -1, b.screws.length));
 

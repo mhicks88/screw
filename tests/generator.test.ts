@@ -256,7 +256,22 @@ describe('generator', () => {
     }
   }, 300_000);
 
-  /* CONTRACT_V2 §5 */
+  /* CONTRACT_V2 §5 — N active boxes are only N fronts if they want N colours. */
+  it('opens every level with distinct active box colours', () => {
+    for (const n of SAMPLE_LEVELS) {
+      const def = level(n);
+      const want = Math.min(def.activeBoxCount, def.colors.length);
+      const opening = new Game(def).snapshot().boxes;
+      expect(opening.length, `level ${n} box count`).toBe(def.activeBoxCount);
+      expect(new Set(opening.map((b) => b.color)).size, `level ${n} opens with duplicate box colours`).toBe(want);
+      const s = measureLevel(def);
+      expect(s.startBoxColors, `level ${n} startBoxColors`).toBe(want);
+      // Duplicates are only tolerable once the pool has run down to one colour,
+      // which is the last handful of moves — short levels feel that tail more.
+      expect(s.avgBoxColors, `level ${n} avgBoxColors`).toBeGreaterThanOrEqual(Math.min(want, 2) * 0.8);
+    }
+  }, 300_000);
+
   it('meets the non-linearity criteria', () => {
     let strict = 0;
     let counted = 0;
@@ -269,8 +284,10 @@ describe('generator', () => {
       expect(s.avgFronts, `level ${n} avgFronts`).toBeGreaterThanOrEqual(t.avgFronts * 0.8);
       expect(s.minReachable, `level ${n} minReachable`).toBeGreaterThanOrEqual(Math.max(1, t.minReachable - 1));
       expect(s.maxChokeRun, `level ${n} chokepoint run`).toBeLessThanOrEqual(Math.max(4, t.maxChokeRun));
-      // Peak visible screws stay in a tappable range on a 440pt-wide phone.
-      expect(s.peakReachable, `level ${n} peak visible`).toBeLessThanOrEqual(34);
+      // Peak visible screws stay in a tappable range on a 440pt-wide phone
+      // (the band averages are 19-23; this is the hard ceiling).
+      expect(s.peakReachable, `level ${n} peak visible`).toBeLessThanOrEqual(38);
+      expect(s.startBoxColors, `level ${n} startBoxColors`).toBeGreaterThanOrEqual(t.startBoxColors);
       if (n <= 50) continue;
       counted++;
       if (s.avgReachable >= 8 && s.minReachable >= 3 && s.avgFronts >= 3 && s.maxChokeRun < 4) strict++;

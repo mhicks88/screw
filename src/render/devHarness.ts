@@ -85,10 +85,20 @@ class FpsMeter {
   }
 }
 
+interface FieldInternals {
+  hintRings: THREE.Mesh[];
+  hintIds: number[];
+}
+
 interface RendererInternals {
   rig: { renderer: THREE.WebGLRenderer; camera: THREE.PerspectiveCamera; canvas: HTMLCanvasElement; scene: THREE.Scene };
-  world: { screws: Map<number, { pos: { x: number; y: number; z: number }; coverCount: number; location: string }> };
   input: { pick(x: number, y: number): number | null };
+  field: FieldInternals;
+  world: {
+    screws: Map<number, { pos: { x: number; y: number; z: number }; coverCount: number; location: string; layer: number }>;
+    traySlots: (number | null)[];
+    tray: { slotCount: number } | null;
+  };
   tweens: { update(dt: number): void; count: number };
   effects: { update(dt: number): void };
 }
@@ -281,6 +291,33 @@ async function main(): Promise<void> {
       deepOpts = { ...deepOpts, ...o };
       useSynth = true;
       newGame();
+    },
+    screwLayer: (id: number) => internals.world.screws.get(id)?.layer ?? -1,
+    /** Hint rings the field is really drawing, with their positions. */
+    hintRingState: () => ({
+      ids: internals.field.hintIds,
+      visible: internals.field.hintRings.filter((r) => r.visible).length,
+      rings: internals.field.hintRings.length,
+      opacity: internals.field.hintRings[0] ? (internals.field.hintRings[0].material as THREE.MeshBasicMaterial).opacity : null,
+    }),
+    /**
+     * Tray occupancy as the game sees it vs what the renderer has parked in the
+     * tray holes, so a stale screw in an empty hole is detectable.
+     */
+    trayState: () => {
+      const logicalIds = internals.world.traySlots.filter((id): id is number => id !== null);
+      const drawnIds: number[] = [];
+      for (const [id, s] of internals.world.screws) {
+        if (s.location === 'tray') drawnIds.push(id);
+      }
+      const snapTray = game.snapshot().tray.filter((id): id is number => id !== null);
+      return {
+        logical: snapTray.length,
+        rendererTray: logicalIds.length,
+        drawn: drawnIds.length,
+        drawnNotLogical: drawnIds.filter((id) => !snapTray.includes(id)),
+        logicalNotDrawn: snapTray.filter((id) => !drawnIds.includes(id)),
+      };
     },
     /** Screws the renderer is actually drawing right now (cover count 0). */
     visibleScrews: () => {

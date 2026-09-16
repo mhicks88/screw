@@ -8,9 +8,10 @@
  *
  * Verifies, for every level it visits: determinism (on a subset), the §2
  * spacing rule including the coverage exemption, plate/screw invariants, the
- * §4 layer distribution, the §5 non-linearity statistics and winnability by
- * replaying the recorded boxQueue through the public Game API. Prints per-band
- * statistics and timings at the end.
+ * §4 layer distribution, the §5 non-linearity statistics (including that the
+ * simultaneously active boxes open on distinct colours) and winnability by
+ * replaying the proven winning line through the public Game API. Prints
+ * per-band statistics and timings at the end.
  */
 import { build } from 'esbuild';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -138,8 +139,10 @@ for (let n = from; n <= to; n += every) {
   check(outcome === 'won', `level ${n}: replay of the recorded queue ended '${outcome}'`);
 
   const t = nonLinearityTargets(n);
+  check(stats.startBoxColors >= t.startBoxColors,
+    `level ${n}: opens with only ${stats.startBoxColors} distinct box colours (wants ${t.startBoxColors})`);
   const meets = stats.avgReachable >= t.avgReachable && stats.minReachable >= t.minReachable
-    && stats.avgFronts >= t.avgFronts && stats.maxChokeRun < 4;
+    && stats.avgFronts >= t.avgFronts && stats.maxChokeRun < 4 && stats.startBoxColors >= t.startBoxColors;
   rows.push({ n, def, stats, ms, meets, params: difficultyFor(n) });
   if (!quiet && (every > 1 || n % 25 === 0)) {
     process.stdout.write(`\r  level ${n}  (${rows.length} done, ${((Date.now() - t0) / 1000).toFixed(0)}s)   `);
@@ -148,7 +151,7 @@ for (let n = from; n <= to; n += every) {
 if (!quiet) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
 const fmt = (v, w, d = 1) => (typeof v === 'number' ? v.toFixed(d) : String(v)).padStart(w);
-const head = ['band', 'levels', 'screws', 'layers', 'plates', 'tow', 'bottom%', 'avgReach', 'avgFront', 'minReach', 'peakVis', 'choke>3', '§5 ok', 'gen ms'];
+const head = ['band', 'levels', 'screws', 'layers', 'plates', 'tow', 'bottom%', 'avgReach', 'avgFront', 'minReach', 'peakVis', 'boxCols', 'choke>3', '§5 ok', 'gen ms'];
 console.log('\n' + head.map((h, i) => h.padStart(i === 0 ? 10 : 9)).join(''));
 
 for (let b = 0; b < BANDS.length; b++) {
@@ -168,6 +171,7 @@ for (let b = 0; b < BANDS.length; b++) {
     fmt(agg((r) => r.stats.avgFronts), 9),
     fmt(agg((r) => r.stats.minReachable), 9),
     fmt(agg((r) => r.stats.peakReachable), 9),
+    `${Math.min(...rs.map((r) => r.stats.startBoxColors))}/${fmt(agg((r) => r.stats.avgBoxColors), 1, 1).trim()}`.padStart(9),
     String(rs.filter((r) => r.stats.maxChokeRun >= 4).length).padStart(9),
     `${Math.round((rs.filter((r) => r.meets).length / rs.length) * 100)}%`.padStart(9),
     fmt(agg((r) => r.ms), 9, 0),
@@ -187,6 +191,8 @@ console.log(`generation     : total ${(genTotal / 1000).toFixed(1)}s, avg ${(gen
 console.log(`maxima         : ${maxScrews} screws, ${maxLayers} layers, ${maxPlates} plates, ${maxPeak} visible at once, ${maxTray} tray slots, ${maxBoxes} active boxes`);
 console.log(`bottom layer   : worst ${(worstBottom.stats.bottomLayerFraction * 100).toFixed(1)}% at level ${worstBottom.n} (limit 35%)`);
 console.log(`§5 compliance  : ${rows.filter((r) => r.meets).length}/${rows.length} levels meet every non-linearity criterion`);
+console.log(`box colours    : every level opens with ${rows.every((r) => r.stats.startBoxColors >= Math.min(r.def.activeBoxCount, r.def.colors.length)) ? 'all-distinct' : 'DUPLICATE'} box colours`
+  + ` (worst average over a play-through ${Math.min(...rows.map((r) => r.stats.avgBoxColors)).toFixed(2)})`);
 console.log(`wall clock     : ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
 if (problems.length) {
