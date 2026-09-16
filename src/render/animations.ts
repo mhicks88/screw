@@ -127,10 +127,18 @@ export async function flyScrew(
  * It is re-parented into world space first (keeping its current world pose), so
  * a panel that comes off while the player is mid-drag falls straight down the
  * screen instead of being whipped around by the rotation it just left.
+ *
+ * `delay` staggers a batch of panels that free together so the end of a level
+ * reads as a collapse rather than as a queue. Nothing waits on this animation
+ * (see events.ts), so the delay costs the player nothing.
  */
-export async function dropPanel(w: World, pv: PanelVisual): Promise<void> {
+export async function dropPanel(w: World, pv: PanelVisual, delay = 0): Promise<void> {
   const gen = w.generation;
   const m = pv.mesh;
+  if (delay > 0) {
+    await w.tweens.delay(delay);
+    if (!isAlive(w, gen)) return;
+  }
   w.rig.assemblyRoot.updateMatrixWorld(true);
   w.rig.fixedRoot.attach(m);
   const mat = makePanelMaterialUnique(pv);

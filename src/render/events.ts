@@ -63,6 +63,15 @@ class Scheduler {
 }
 
 /**
+ * Panel falls overlap too, and on the same reasoning as the flights: a level
+ * that ends by freeing six panels at once should read as a collapse, not as a
+ * queue. The window is short because the falls are no longer on the critical
+ * path of anything.
+ */
+const DROP_WINDOW_MS = 420;
+const DROP_STAGGER_MAX = 70;
+
+/**
  * Screw flights overlap rather than serialise. At the v2 scale one batch can
  * hold 15 screws (magnet) or a whole tower's worth during a cascade, so the
  * stagger shrinks with the batch size: total launch window stays under ~0.8 s
@@ -71,6 +80,23 @@ class Scheduler {
 const FLIGHT_WINDOW_MS = 760;
 const FLIGHT_STAGGER_MAX = 70;
 const FLIGHT_STAGGER_MIN = 24;
+
+/**
+ * Hard ceiling on how long a batch that ENDS THE LEVEL may hold `playEvents`
+ * open (animation-clock ms).
+ *
+ * The screw flights and the box choreography are genuinely causal — a screw
+ * cannot drop into a box that has not slid in yet — so when the player taps
+ * faster than the boxes can cycle, a backlog builds and the last tap's
+ * animation can land seconds after the tap. Measured on a 36-screw board with
+ * taps 160 ms apart: 7.2 s of animation still queued when the winning screw was
+ * tapped. The player has just finished the level; they are not waiting that
+ * long to be told. Past this point the modal goes up and the remaining
+ * choreography plays out behind it, where it is covered anyway.
+ *
+ * Unbacklogged play finishes in ~1.9 s, so this never fires in normal play.
+ */
+const END_WAIT_CAP_MS = 2000;
 
 /** Same idea for the "you just uncovered these" ripple. */
 const RISE_WINDOW_MS = 520;
@@ -92,33 +118,58 @@ export class EventPlayer {
   play(events: GameEvent[]): Promise<void> {
     const w = this.w;
     const gen = w.generation;
+    /** Everything this batch started (used to sequence the confetti). */
     const created: Promise<void>[] = [];
+    /**
+     * The subset the CALLER waits for. `playEvents` resolves on these alone,
+     * because the UI shows the win/lose modal when it resolves (CONTRACT.md §3)
+     * and the player should not sit and watch scenery before being told they
+     * won. A screw reaching its hole and a box leaving are things they are
+     * waiting for; a panel tumbling off the bottom of the screen, a ripple of
+     * uncovered screws and the confetti are not — those keep animating quite
+     * happily behind the modal.
+     */
+    const awaited: Promise<void>[] = [];
     let flightIndex = 0;
+    let dropIndex = 0;
+    /** This batch ends the level, so its wait is capped (see END_WAIT_CAP_MS). */
+    let endsLevel = false;
     let lastPanelDrop: Promise<void> | null = null;
 
     let flightCount = 0;
+    let dropCount = 0;
     let finalTraySlots = w.traySlots.length;
     for (const ev of events) {
       if (ev.type === 'screwToBox' || ev.type === 'screwToTray') flightCount++;
+      else if (ev.type === 'panelDrop') dropCount++;
       else if (ev.type === 'traySlotAdded') finalTraySlots = Math.max(finalTraySlots, ev.slotIndex + 1);
     }
+    const dropStagger = dropCount <= 1 ? 0 : Math.min(DROP_STAGGER_MAX, DROP_WINDOW_MS / dropCount);
     let trayGrown = false;
     const flightStagger =
       flightCount <= 1
         ? 0
         : Math.max(FLIGHT_STAGGER_MIN, Math.min(FLIGHT_STAGGER_MAX, FLIGHT_WINDOW_MS / flightCount));
 
+    /**
+     * Schedule one animation. `blocking: false` means "the caller does not wait
+     * for this": it is still ordered against the same resource keys, so a later
+     * batch touching the same panel or screw still queues behind it, but it
+     * does not hold `playEvents` open.
+     */
     const go = (
       waitKeys: string[],
       registerKeys: string[],
       fn: () => Promise<void>,
       extra?: Promise<void> | null,
+      blocking = true,
     ): Promise<void> => {
       const deps: Promise<void>[] = [this.sched.wait(waitKeys)];
       if (extra) deps.push(extra);
       const p = Promise.all(deps).then(() => (w.generation === gen ? fn() : undefined));
       this.sched.register(registerKeys, p);
       created.push(p);
+      if (blocking) awaited.push(p);
       return p;
     };
 
@@ -218,7 +269,14 @@ export class EventPlayer {
           if (!pv || pv.dropped) break;
           pv.dropped = true;
           w.field.markDirty();
-          lastPanelDrop = go([`panel:${pv.id}`], [`panel:${pv.id}`], () => dropPanel(w, pv));
+          const delay = dropIndex++ * dropStagger;
+          lastPanelDrop = go(
+            [`panel:${pv.id}`],
+            [`panel:${pv.id}`],
+            () => dropPanel(w, pv, delay),
+            null,
+            false,
+          );
           break;
         }
         case 'screwsUnblocked': {
@@ -236,7 +294,7 @@ export class EventPlayer {
             });
             w.field.markDirty();
             await Promise.all(runs);
-          }, lastPanelDrop);
+          }, lastPanelDrop, false);
           break;
         }
         case 'screwRevealed': {
@@ -245,7 +303,7 @@ export class EventPlayer {
           s.color = ev.color;
           s.revealed = true;
           const color = ev.color;
-          go([`screw:${s.id}`], [], () => revealScrew(w, s, color), lastPanelDrop);
+          go([`screw:${s.id}`], [], () => revealScrew(w, s, color), lastPanelDrop, false);
           break;
         }
         case 'traySlotAdded': {
@@ -274,13 +332,18 @@ export class EventPlayer {
           break;
         }
         case 'win': {
-          const all = Promise.all([...created]).then(() => undefined);
+          endsLevel = true;
+          // The burst follows the last screw home, but nothing waits on it:
+          // 1.7 s of confetti in front of a modal that has not appeared yet is
+          // exactly the stall this split exists to remove.
+          const essential = Promise.all([...awaited]).then(() => undefined);
           go([], [], async () => {
             await w.effects.confetti(new THREE.Vector3(0, BOX_Y - 1.5, 1.5));
-          }, all);
+          }, essential, false);
           break;
         }
         case 'lose': {
+          endsLevel = true;
           go(['tray'], ['tray'], () => shakeTray(w));
           break;
         }
@@ -289,6 +352,12 @@ export class EventPlayer {
       }
     }
 
-    return Promise.all(created).then(() => undefined);
+    const all = Promise.all(awaited).then(() => undefined);
+    if (!endsLevel) return all;
+    // The race can leave `all` to settle on its own; make sure a failure in it
+    // is never an unhandled rejection. A failure that arrives FIRST still
+    // propagates to the caller, exactly as before.
+    all.catch(() => undefined);
+    return Promise.race([all, w.tweens.delay(END_WAIT_CAP_MS)]);
   }
 }

@@ -322,6 +322,86 @@ async function main(): Promise<void> {
       for (const e of ev) hist[e.type] = (hist[e.type] ?? 0) + 1;
       return { events: ev.length, animMs: t, hist };
     },
+    /**
+     * Play a level all the way to a real win, tap by tap, on a hand-driven
+     * clock, and report when the win batch's `playEvents` actually resolves —
+     * which is the moment CONTRACT.md §3 says the UI puts the modal up.
+     *
+     * Wall-clock timing is meaningless in a software-rasterised harness (the
+     * render loop clamps dt to 100 ms, so 1 fps runs animations 10x slow); this
+     * measures animation-clock milliseconds instead, which is what the device
+     * will actually experience.
+     */
+    winTiming: async (tapGapMs = 160) => {
+      newGame();
+      const batches: GameEvent[][] = [];
+      batches.push(widenTray(80));
+      let guard = 0;
+      while (guard++ < 3000) {
+        // Drill ANY screw still on a panel, reachable or not: this has to reach
+        // an actual win, and a hand-built synthetic assembly is not
+        // solvable-by-construction the way the real generator is.
+        const next = game.snapshot().screws.find((x) => x.location === 'plate');
+        if (!next) break;
+        const res = game.usePowerUp('drill', next.id);
+        if (!res.ok) break;
+        batches.push(res.events);
+      }
+      const drops = batches.reduce((n, b) => n + b.filter((e) => e.type === 'panelDrop').length, 0);
+      const winBatch = batches.find((b) => b.some((e) => e.type === 'win'));
+      const dropsInWinBatch = winBatch ? winBatch.filter((e) => e.type === 'panelDrop').length : 0;
+
+      renderer.timeScale = 0;
+      renderer.setActive(false); // don't fight the software rasteriser for frames
+      let clock = 0;
+      const step = async (ms: number) => {
+        for (let i = 0; i < ms; i += 16) {
+          internals.tweens.update(16);
+          internals.effects.update(16);
+          clock += 16;
+          await new Promise((r) => setTimeout(r, 0));
+        }
+      };
+      let winDispatched = -1;
+      let winResolved = -1;
+      let lastScrewDispatched = -1;
+      const pending: Promise<void>[] = [];
+      for (const ev of batches) {
+        const hasWin = ev.some((e) => e.type === 'win');
+        if (ev.some((e) => e.type === 'screwToBox' || e.type === 'screwToTray')) lastScrewDispatched = clock;
+        if (hasWin) winDispatched = clock;
+        pending.push(
+          renderer.playEvents(ev).then(() => {
+            if (hasWin && winResolved < 0) winResolved = clock;
+          }),
+        );
+        await step(tapGapMs);
+      }
+      let guard2 = 0;
+      while (winResolved < 0 && guard2++ < 2000) await step(64);
+      // Keep driving the clock until everything settles. The win batch may now
+      // resolve while other animations are still running (that is the point),
+      // so a bare `await Promise.all` here would hang: nothing would tick them.
+      let allDone = false;
+      void Promise.all(pending).then(() => {
+        allDone = true;
+      });
+      let guard3 = 0;
+      while (!allDone && guard3++ < 2000) await step(64);
+      renderer.timeScale = 1;
+      renderer.setActive(true);
+      return {
+        taps: batches.length - 1,
+        panelDrops: drops,
+        dropsInWinBatch,
+        /** Animation ms from dispatching the winning tap to the modal being allowed up. */
+        winLatencyMs: winResolved - winDispatched,
+        /** Animation ms from the last screw leaving to the modal being allowed up. */
+        sinceLastScrewMs: winResolved - lastScrewDispatched,
+        totalMs: clock,
+      };
+    },
+
     snapshot: () => game.snapshot(),
     reachable: () => game.reachableScrewIds(),
     restart: newGame,
