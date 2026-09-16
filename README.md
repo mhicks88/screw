@@ -13,21 +13,30 @@ is open and every power-up is free and unlimited.
 
 ## Run it on your iPhone
 
-You need a computer on the same Wi-Fi network as the phone (once, to install).
+### Option A — free HTTPS URL via GitHub Pages (recommended: works offline)
+
+1. Merge this branch into `main`.
+2. In the GitHub repo: **Settings → Pages → Source: GitHub Actions**.
+3. The included workflow (`.github/workflows/pages.yml`) runs the tests, builds,
+   and publishes to `https://<your-user>.github.io/screw/`.
+4. On the iPhone open that URL in **Safari**, tap **Share → Add to Home Screen
+   → Add**. The icon launches full-screen and keeps working with no network.
+
+### Option B — straight from your computer on the same Wi-Fi
 
 ```bash
 npm install
 npm run build
-npm run preview      # prints a http://<your-computer-ip>:4173 URL
+npm run preview      # prints http://<your-computer-ip>:4173
 ```
 
-1. On the iPhone, open **Safari** and go to the URL printed by `preview`.
-2. Tap **Share** → **Add to Home Screen** → **Add**.
-3. Launch "Screwdom" from the Home Screen. It runs full-screen and offline
-   from then on; you can stop the computer.
+Open that address in Safari on the phone and **Add to Home Screen** the same
+way. This works immediately, but because it is plain HTTP the browser will not
+install the offline cache, so the computer has to keep serving while you play.
 
-Any static host also works (the `dist/` folder is plain files), e.g.
-GitHub Pages, Netlify, or `python3 -m http.server -d dist`.
+Any static HTTPS host also works (Netlify, Vercel, Cloudflare Pages): upload
+the `dist/` folder. If the site lives under a sub-path, build with
+`VITE_BASE=/that-path/ npm run build`.
 
 ## Optional: real native app via Xcode
 

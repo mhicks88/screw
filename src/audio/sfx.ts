@@ -63,7 +63,8 @@ export function installAudioUnlock(): void {
 
 export function setSoundEnabled(on: boolean): void {
   enabled = on;
-  if (on) resume();
+  // Only resume an existing context: creating one before a user gesture is refused by browsers.
+  if (on && ctx) resume();
 }
 
 export function isSoundEnabled(): boolean {
