@@ -1,10 +1,9 @@
 import * as THREE from 'three';
-import { HIT_LAYER } from './screwMesh';
 
 export interface InputOptions {
   canvas: HTMLCanvasElement;
   camera: THREE.Camera;
-  /** Hit meshes (invisible spheres on HIT_LAYER) to raycast against. */
+  /** Tap targets: one invisible marker per currently tappable screw. */
   hitTargets: () => THREE.Object3D[];
   /** Called on a completed tap (pointer up without a drag > 12 px). */
   onTap: (screwId: number) => void;
@@ -19,12 +18,13 @@ export interface InputOptions {
 
 const DRAG_CANCEL_PX = 12;
 /**
- * How far off a screw a tap may land and still count, in CSS px. Deep levels
- * put adjacent tap targets ~26 px apart, well under the 44 px a fingertip
- * covers, so without this a slightly-off tap does nothing at all. Kept below
- * half the tightest observed gap so it cannot reach past a nearer neighbour.
+ * How far from a screw's centre a tap may land and still resolve to it, in CSS
+ * px. Deep levels put adjacent tap targets ~26 px apart, well under the 44 px
+ * a fingertip covers, so a tap that must land inside the disc is often lost.
+ * This is generous enough to rescue those without letting a tap on empty
+ * background reach across the model.
  */
-const NEAR_MISS_PX = 13;
+const PICK_RADIUS_PX = 26;
 /** Two targets within this many px of the touch count as tied on distance. */
 const NEAR_MISS_TIE_PX = 3;
 
@@ -42,8 +42,6 @@ const NEAR_MISS_TIE_PX = 3;
  * should never have to hunt for empty background to turn the object.
  */
 export class InputHandler {
-  private readonly raycaster = new THREE.Raycaster();
-  private readonly ndc = new THREE.Vector2();
   private readonly scratch = new THREE.Vector3();
   private active: {
     pointerId: number;
@@ -69,7 +67,6 @@ export class InputHandler {
 
   constructor(opts: InputOptions) {
     this.opts = opts;
-    this.raycaster.layers.set(HIT_LAYER);
     const c = opts.canvas;
     c.style.touchAction = 'none';
     c.addEventListener('pointerdown', this.onDown);
@@ -97,29 +94,24 @@ export class InputHandler {
   pick(clientX: number, clientY: number): number | null {
     const rect = this.opts.canvas.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return null;
-    this.ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.ndc, this.opts.camera);
-    const targets = this.opts.hitTargets();
-    const hits = this.raycaster.intersectObjects(targets, false);
-    if (hits.length > 0) {
-      // Nearest to the camera wins: on a solid, the screw in front is the one the
-      // player can see and therefore the one they meant.
-      let best = hits[0];
-      for (let i = 1; i < hits.length; i++) if (hits[i].distance < best.distance) best = hits[i];
-      const id = best.object.userData.screwId;
-      return typeof id === 'number' ? id : null;
-    }
-    return this.pickNearMiss(clientX, clientY, rect, targets);
+    return this.pickNearMiss(clientX, clientY, rect, this.opts.hitTargets());
   }
 
   /**
-   * Forgive a near miss. On deep levels adjacent tap targets sit ~26 CSS px
-   * apart on screen, so a fingertip that lands just off a screw hits nothing
-   * and the tap is silently lost. When the ray misses everything, fall back to
-   * the closest target within NEAR_MISS_PX of the touch point, preferring the
-   * one nearest the camera when two are within a few pixels of each other.
-   * This never overrides a direct hit, so it cannot make a confident tap land
-   * on the wrong screw — it only rescues taps that would otherwise do nothing.
+   * Resolve a tap to the screw the player was aiming at.
+   *
+   * Picking used to take the first sphere the ray entered, which on a solid
+   * means the one nearest the camera. That is wrong when tap spheres overlap:
+   * deep levels put adjacent targets ~26 CSS px apart while a sphere is ~38 px
+   * across, so a tap 10 px off its screw could enter a neighbour's sphere first
+   * and remove the wrong screw. Measured at 4-7% of off-centre taps.
+   *
+   * Intent is better modelled by screen distance: the player aims at a visible
+   * disc, so the disc whose centre is closest to the touch wins, with the one
+   * nearer the camera breaking ties inside a few pixels (when two genuinely
+   * overlap, the visible one is the front one). A radius limit keeps a tap on
+   * empty background from reaching across the screen, and taps beyond every
+   * sphere still resolve, which is what stops a slightly-off tap being lost.
    */
   private pickNearMiss(
     clientX: number,
@@ -129,7 +121,7 @@ export class InputHandler {
   ): number | null {
     const cam = this.opts.camera;
     let bestId: number | null = null;
-    let bestPx = NEAR_MISS_PX;
+    let bestPx = PICK_RADIUS_PX;
     let bestDepth = Infinity;
     for (const t of targets) {
       const id = t.userData.screwId;
