@@ -53,8 +53,14 @@ export const TRAY_HEIGHT = 0.3;
 export const TRAY_PAD = 0.34;
 export const TRAY_HOLE_R = 0.2;
 
-export const SCREW_HEAD_R = 0.23;
-export const SCREW_HIT_R = 0.41;
+/**
+ * Screw head size and tap radius come from core, which owns the spacing the
+ * generator places screws at. They were duplicated here and drifted: core cut
+ * SCREW_SPACING to 0.62 while this file still said 0.41, which made
+ * neighbouring hit spheres overlap by a third of their radius and let a tap
+ * land on the wrong screw. Import them so the two can never disagree again.
+ */
+export { SCREW_HEAD_R, SCREW_HIT_R } from '../core/spacing';
 
 /**
  * Bounding region the camera must keep visible: the boxes/tray rows in y, and
