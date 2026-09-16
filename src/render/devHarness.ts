@@ -3,15 +3,17 @@
  *
  * Uses the real core (generateLevel + Game) when src/core/index.ts exists.
  * `?fake=1` forces the built-in fake game; `?synth=1` (plus optional
- * `layers`/`towers`/`screws`/`colors`/`seed`/`mono`) builds a CONTRACT_V2-scale
- * deep stack by hand, which is how the v2 renderer work was verified while the
- * generator was still being rewritten.
+ * `shells`/`screws`/`colors`/`seed`/`mono`) builds a CONTRACT_V3-scale synthetic
+ * ASSEMBLY by hand — nested shells of panels on a frame, screws on faces
+ * pointing every way — which is how the v3 rotation work is verified while the
+ * generator is still being rewritten.
  */
 import * as THREE from 'three';
 import type { GameApi, GameEvent, LevelDef, PowerUpId } from '../core/types';
 import { GameRenderer } from './renderer';
 import { FakeGame, buildFakeLevel } from './devGame';
-import { buildDeepLevel, describeLevel } from './devLevels';
+import { buildAssemblyLevel, describeLevel } from './devLevels';
+import { FACING_MIN_DOT } from './layout';
 
 /* -------------------------------- boot --------------------------------- */
 
@@ -88,14 +90,44 @@ class FpsMeter {
 interface FieldInternals {
   hintRings: THREE.Mesh[];
   hintIds: number[];
+  tappableIds(): number[];
+  seatedCount(): number;
+  offscreenRemovable(): { id: number }[];
+}
+
+interface OrbitInternals {
+  quaternion: THREE.Quaternion;
+  begin(): void;
+  drag(dx: number, dy: number, dt: number): void;
+  end(): void;
+  update(dt: number): boolean;
+  reset(q?: THREE.Quaternion): void;
 }
 
 interface RendererInternals {
-  rig: { renderer: THREE.WebGLRenderer; camera: THREE.PerspectiveCamera; canvas: HTMLCanvasElement; scene: THREE.Scene };
+  rig: {
+    renderer: THREE.WebGLRenderer;
+    camera: THREE.PerspectiveCamera;
+    canvas: HTMLCanvasElement;
+    scene: THREE.Scene;
+    assemblyRoot: THREE.Group;
+    fixedRoot: THREE.Group;
+    assemblyPixelRadius(): number;
+  };
   input: { pick(x: number, y: number): number | null };
   field: FieldInternals;
+  orbit: OrbitInternals;
   world: {
-    screws: Map<number, { pos: { x: number; y: number; z: number }; coverCount: number; location: string; layer: number }>;
+    screws: Map<number, {
+      pos: THREE.Vector3;
+      home: THREE.Vector3;
+      axis: THREE.Vector3;
+      blocked: boolean;
+      facing: boolean;
+      location: string;
+      shell: number;
+    }>;
+    panels: Map<number, unknown>;
     traySlots: (number | null)[];
     tray: { slotCount: number } | null;
   };
@@ -107,14 +139,13 @@ async function main(): Promise<void> {
   const container = document.getElementById('app')!;
   const status = document.getElementById('status')!;
   const params = new URLSearchParams(location.search);
-  const synth = params.has('synth') || params.has('layers') || params.has('screws');
+  const synth = params.has('synth') || params.has('shells') || params.has('screws');
   // `?fake=1` forces the built-in fake game; `?synth=1` uses the deep v2 stack.
   const core = params.get('fake') || synth ? null : await loadCore();
   let levelNo = Number(params.get('level') ?? '1') || 1;
   let deepOpts = {
-    layers: Number(params.get('layers') ?? '14') || 14,
-    towers: Number(params.get('towers') ?? '3') || 3,
-    targetScrews: Number(params.get('screws') ?? '141') || 141,
+    shells: Number(params.get('shells') ?? '5') || 5,
+    targetScrews: Number(params.get('screws') ?? '162') || 162,
     colors: Number(params.get('colors') ?? '7') || 7,
     seed: Number(params.get('seed') ?? '48879') || 48879,
     traySlots: 8,
@@ -127,7 +158,7 @@ async function main(): Promise<void> {
 
   const newGame = () => {
     if (useSynth || !core) {
-      level = useSynth ? buildDeepLevel(deepOpts) : buildFakeLevel();
+      level = useSynth ? buildAssemblyLevel(deepOpts) : buildFakeLevel();
       game = new FakeGame(level);
     } else {
       level = core.generateLevel(levelNo);
@@ -135,7 +166,7 @@ async function main(): Promise<void> {
     }
     renderer.loadLevel(game.snapshot());
     const d = describeLevel(level!);
-    status.textContent = `${useSynth ? 'synth' : core ? 'core' : 'fake'} · ${d.screws} screws · ${d.plates} plates · ${d.layers} layers · bottom ${(d.bottomLayerFraction * 100) | 0}%`;
+    status.textContent = `${useSynth ? 'synth' : core ? 'core' : 'fake'} · ${d.screws} screws · ${d.panels} panels · ${d.shells} shells · r${d.maxRadius} · ${d.axisSpread} axes`;
   };
 
   let targeting = false;
@@ -216,6 +247,13 @@ async function main(): Promise<void> {
     useSynth = !useSynth;
     newGame();
   });
+  bind('btn-spin', () => {
+    // A quarter turn, driven exactly as a drag would drive it.
+    const px = internals.rig.assemblyPixelRadius() * (Math.PI / 2);
+    internals.orbit.begin();
+    for (let i = 0; i < 12; i++) internals.orbit.drag(px / 12, 0, 16);
+    internals.orbit.end();
+  });
   bind('btn-magnet', () => {
     const ev = magnet();
     const t0 = performance.now();
@@ -287,12 +325,12 @@ async function main(): Promise<void> {
     snapshot: () => game.snapshot(),
     reachable: () => game.reachableScrewIds(),
     restart: newGame,
-    setDeep: (o: Partial<typeof deepOpts>) => {
+    setAssembly: (o: Partial<typeof deepOpts>) => {
       deepOpts = { ...deepOpts, ...o };
       useSynth = true;
       newGame();
     },
-    screwLayer: (id: number) => internals.world.screws.get(id)?.layer ?? -1,
+    screwShell: (id: number) => internals.world.screws.get(id)?.shell ?? -1,
     /** Hint rings the field is really drawing, with their positions. */
     hintRingState: () => ({
       ids: internals.field.hintIds,
@@ -319,19 +357,111 @@ async function main(): Promise<void> {
         logicalNotDrawn: snapTray.filter((id) => !drawnIds.includes(id)),
       };
     },
-    /** Screws the renderer is actually drawing right now (cover count 0). */
+    /** Screws the renderer is actually drawing solid right now. */
     visibleScrews: () => {
       const out: number[] = [];
-      for (const [id, s] of internals.world.screws) if (s.location === 'plate' && s.coverCount === 0) out.push(id);
+      for (const [id, s] of internals.world.screws) {
+        if (s.location === 'plate' && !s.blocked && s.facing) out.push(id);
+      }
       return out;
     },
-    /** Client-space position of a screw, for synthetic taps. */
+
+    /* ----------------------- v3: rotation checks ---------------------- */
+
+    /** Ids the renderer will accept a tap on (its hit proxies). */
+    tappable: () => [...internals.field.tappableIds()].sort((a, b) => a - b),
+
+    /** Current assembly orientation. */
+    orientation: () => {
+      const q = internals.rig.assemblyRoot.quaternion;
+      const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+      return {
+        quat: { x: q.x, y: q.y, z: q.z, w: q.w },
+        eulerDeg: {
+          x: Math.round(THREE.MathUtils.radToDeg(e.x)),
+          y: Math.round(THREE.MathUtils.radToDeg(e.y)),
+          z: Math.round(THREE.MathUtils.radToDeg(e.z)),
+        },
+      };
+    },
+
+    /** Set an exact orientation (degrees, YXZ), for reproducible screenshots. */
+    setOrientation: (yawDeg: number, pitchDeg: number, rollDeg = 0) => {
+      const q = new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(
+          THREE.MathUtils.degToRad(pitchDeg),
+          THREE.MathUtils.degToRad(yawDeg),
+          THREE.MathUtils.degToRad(rollDeg),
+          'YXZ',
+        ),
+      );
+      internals.orbit.reset(q);
+    },
+
+    /** Drive the orbit controller directly (px deltas), as a drag would. */
+    spin: (dx: number, dy: number, steps = 8) => {
+      internals.orbit.begin();
+      for (let i = 0; i < steps; i++) internals.orbit.drag(dx / steps, dy / steps, 16);
+      internals.orbit.end();
+    },
+
+    radiusPx: () => internals.rig.assemblyPixelRadius(),
+
+    /**
+     * CONTRACT_V3 §6, the property v2 established and v3 must keep: when the
+     * board is idle the renderer's TAPPABLE set is exactly the core's
+     * REMOVABLE set intersected with front-facing. Recomputed here from the
+     * level defs and the camera, independently of the renderer's own state.
+     */
+    checkTappable: () => {
+      const snap = game.snapshot();
+      const lvl = snap.level;
+      const cam = internals.rig.camera;
+      internals.rig.assemblyRoot.updateMatrixWorld(true);
+      const inv = internals.rig.assemblyRoot.quaternion.clone().invert();
+      const camLocal = cam.position.clone().applyQuaternion(inv);
+      const defs = new Map(lvl.screws.map((d) => [d.id, d]));
+      const removable = new Set(game.reachableScrewIds());
+      const expected: number[] = [];
+      const facingOnly: number[] = [];
+      for (const st of snap.screws) {
+        if (st.location !== 'plate') continue;
+        const d = defs.get(st.id)!;
+        const axis = new THREE.Vector3(d.axis.x, d.axis.y, d.axis.z).normalize();
+        const pos = new THREE.Vector3(d.position.x, d.position.y, d.position.z);
+        const facing = camLocal.clone().sub(pos).normalize().dot(axis) >= FACING_MIN_DOT;
+        if (facing) facingOnly.push(st.id);
+        if (facing && removable.has(st.id)) expected.push(st.id);
+      }
+      expected.sort((a, b) => a - b);
+      const actual = [...internals.field.tappableIds()].sort((a, b) => a - b);
+      return {
+        ok: expected.length === actual.length && expected.every((v, i) => v === actual[i]),
+        removable: removable.size,
+        frontFacing: facingOnly.length,
+        expected: expected.length,
+        actual: actual.length,
+        missing: expected.filter((id) => !actual.includes(id)),
+        extra: actual.filter((id) => !expected.includes(id)),
+      };
+    },
+
+    /** How many removable screws are hidden round the back right now. */
+    behind: () => internals.field.offscreenRemovable().length,
+    /**
+     * Client-space position of a screw, for synthetic taps. A seated screw's
+     * `pos` is in ASSEMBLY space, so it has to go through the assembly's world
+     * matrix first — that transform IS the rotation the player drives.
+     */
     screenPos: (id: number) => {
       const s = internals.world.screws.get(id);
       if (!s) return null;
-      const rig = internals.rig as unknown as { camera: THREE.Camera; canvas: HTMLCanvasElement };
+      const rig = internals.rig;
       rig.camera.updateMatrixWorld(true);
-      const p = new THREE.Vector3(s.pos.x, s.pos.y, s.pos.z).project(rig.camera);
+      rig.assemblyRoot.updateMatrixWorld(true);
+      const p = new THREE.Vector3(s.pos.x, s.pos.y, s.pos.z);
+      if (s.location === 'plate') p.applyMatrix4(rig.assemblyRoot.matrixWorld);
+      p.project(rig.camera);
       const rect = rig.canvas.getBoundingClientRect();
       return { x: rect.left + (p.x * 0.5 + 0.5) * rect.width, y: rect.top + (-p.y * 0.5 + 0.5) * rect.height };
     },

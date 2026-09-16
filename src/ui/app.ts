@@ -1,12 +1,15 @@
 /**
  * App orchestration: screens, game loop glue between core <-> renderer <-> HUD.
  *
- * v2 notes (CONTRACT_V2):
- *  - Levels reach ~150 screws, so a session is long: the board is persisted
+ * Notes (CONTRACT_V2, CONTRACT_V3):
+ *  - Levels reach ~190 screws, so a session is long: the board is persisted
  *    after every move and can be resumed from the menu or the level grid.
  *  - Generation costs up to ~2 s and happens in a worker behind a loading
  *    overlay. `generateLevel` is never called to *describe* a level — the level
  *    grid uses the pure `difficultyLabelFor(n)`.
+ *  - v3: the board is a solid assembly the player turns with a one-finger drag.
+ *    Teaching that gesture once is this file's job (see ./coach); the ongoing
+ *    in-scene nudge toward off-screen screws belongs to the renderer.
  */
 import { Game, TOTAL_LEVELS, difficultyLabelFor } from '../core';
 import type { ActionResult, GameEvent, GameSnapshot, LevelDef, PowerUpId } from '../core/types';
@@ -20,9 +23,12 @@ import {
   loadGameState,
   loadProgress,
   markCompleted,
+  markRotateLearned,
+  noteRotateCoachShown,
   saveGameState,
   saveProgress,
   setCurrentLevel,
+  shouldShowRotateCoach,
   type Progress,
 } from '../storage/progress';
 import './styles.css';
@@ -32,6 +38,7 @@ import { createLevelSelect, type Difficulty } from './levelSelect';
 import { createHud } from './hud';
 import { createSettings } from './settings';
 import { createLoadingOverlay } from './loading';
+import { createRotateCoach } from './coach';
 import { LevelLoader } from './levelLoader';
 import { closeModal, isModalOpen, showConfirm, showHowToPlay, showLoseModal, showWinModal } from './modals';
 
@@ -45,13 +52,17 @@ const SAVE_DEBOUNCE_MS = 450;
 const MIN_LOADING_MS = 320;
 /** Build the next level in the background this long after the current one starts. */
 const PREFETCH_DELAY_MS = 1500;
+/** Let the board land before asking the player to turn it. */
+const ROTATE_COACH_DELAY_MS = 1100;
+/** How many times to wait out a modal (the first-run card) before giving up. */
+const ROTATE_COACH_RETRIES = 12;
 
 const REFUSAL_TEXT: Record<NonNullable<ActionResult['reason']>, string> = {
   notPlaying: '',
-  blocked: 'That screw is covered by another plate',
+  blocked: 'Something is in the way of that screw',
   trayFull: 'The tray is full',
   noSuchScrew: 'No such screw',
-  notOnPlate: 'That screw is already off the plate',
+  notOnPlate: 'That screw is already out',
   noEmptyBox: 'No empty box to repaint',
   maxSlots: 'The tray is already at its maximum size',
   maxBoxes: 'No room for another box',
@@ -204,7 +215,7 @@ export function startApp(): void {
       }
       showConfirm({
         title: 'Restart level?',
-        text: 'Every screw goes back to its plate and your saved board for this level is discarded.',
+        text: 'Every panel goes back on the model and your saved board for this level is discarded.',
         confirmLabel: 'Restart',
         onConfirm: () => restartLevel(),
       });
@@ -223,8 +234,25 @@ export function startApp(): void {
     },
   });
 
+  const rotateCoach = createRotateCoach({
+    onLearned: () => {
+      // The player turned the model. Never teach this again, on any device
+      // where this progress record travels.
+      markRotateLearned(progress);
+    },
+  });
+
   const canvasHost = h('div', { class: 'canvas-host' });
-  const gameScreen = h('section', { class: 'screen', id: 'screen-game' }, canvasHost, hud.top, hud.bottom, hud.banner);
+  const gameScreen = h(
+    'section',
+    { class: 'screen', id: 'screen-game' },
+    canvasHost,
+    hud.top,
+    hud.bottom,
+    hud.banner,
+    rotateCoach.el,
+  );
+  rotateCoach.watch(canvasHost);
 
   const screens: Record<ScreenName, HTMLElement> = {
     menu: menu.el,
@@ -259,6 +287,7 @@ export function startApp(): void {
       requestAnimationFrame(updateInsets);
     } else {
       renderer?.setActive(false);
+      rotateCoach.hide();
       clearSoundTimers();
     }
   }
@@ -278,6 +307,7 @@ export function startApp(): void {
     if (!renderer || screen !== 'game') return;
     const m = hud.measure();
     renderer.setInsets(m.top, m.bottom);
+    rotateCoach.setBottom(m.bottom + 14);
     if (targeting) hud.setTargeting(true); // re-position the banner
   }
 
@@ -420,6 +450,7 @@ export function startApp(): void {
     hud.setProgress(snap.removedScrews, snap.totalScrews);
     hud.setTray(snap.tray.filter((s) => s !== null).length, snap.tray.length);
     schedulePrefetch(levelNumber + 1);
+    maybeShowRotateCoach();
   }
 
   /** Rebuild the same level from the LevelDef we already have — no generation. */
@@ -612,6 +643,32 @@ export function startApp(): void {
     }
   }
 
+  /**
+   * The one-time teach for the drag gesture. Held back until the board has had
+   * a moment to settle so it does not fight the level-in animation, and skipped
+   * entirely once the player has rotated anything, ever.
+   *
+   * On the very first level the first-run "How to play" card is up at the same
+   * moment, so the mark waits its turn rather than being wasted behind it.
+   */
+  function maybeShowRotateCoach(attempt = 0): void {
+    if (attempt === 0) rotateCoach.hide();
+    if (!shouldShowRotateCoach(progress)) return;
+    const forLevel = levelNumber;
+    window.setTimeout(() => {
+      if (screen !== 'game' || levelNumber !== forLevel) return;
+      if (!shouldShowRotateCoach(progress)) return;
+      if (game?.snapshot().status !== 'playing') return;
+      if (isModalOpen() || loading.isVisible()) {
+        if (attempt < ROTATE_COACH_RETRIES) maybeShowRotateCoach(attempt + 1);
+        return;
+      }
+      updateInsets();
+      rotateCoach.show();
+      noteRotateCoachShown(progress);
+    }, ROTATE_COACH_DELAY_MS);
+  }
+
   function maybeShowHowTo(): void {
     let seen = false;
     try {
@@ -674,9 +731,11 @@ export function startApp(): void {
           at(t, 'boxSpawn');
           t += 260;
           break;
-        case 'plateDrop':
-          at(t, 'plateDrop');
-          t += 320;
+        case 'panelDrop':
+          // The thud lands as the panel unsticks; the fall itself runs ~660 ms
+          // (src/render/animations.ts dropPanel), so hold the next cue back.
+          at(t, 'panelDrop');
+          t += 520;
           break;
         case 'screwRevealed':
           at(t, 'tap');
@@ -714,11 +773,22 @@ export function startApp(): void {
       /** Same code path as a real tap on the canvas. */
       debugTap: (id: number) => handleScrewTap(id),
       startLevel: (n: number) => openLevel(n, 'new'),
+      /**
+       * Put a hand-made LevelDef on screen without going near `generateLevel`.
+       * Walkthroughs use it to exercise the game screen while the generator is
+       * being worked on; nothing in the shipped app calls it.
+       */
+      loadLevelDef: (def: LevelDef) => {
+        loading.hide();
+        loadToken++;
+        installGame(def.level, def, new Game(def));
+      },
       openLevel: (n: number, mode: 'new' | 'resume' | 'auto' = 'auto') => openLevel(n, mode),
       showScreen,
       usePowerUp,
       difficultyOf,
       isLoading: () => loading.isVisible(),
+      rotateCoachVisible: () => rotateCoach.isVisible(),
       saveNow,
       loadSaved: (n?: number): GameSnapshot | null => loadGameState(n),
       reloadProgress: () => {

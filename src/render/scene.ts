@@ -1,14 +1,13 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { DEPTH_TINT, KEY_LIGHT, VIEW_BOUNDS } from './layout';
+import { ASSEMBLY_RADIUS, DEPTH_TINT, KEY_LIGHT, VIEW_BOUNDS } from './layout';
 
 /**
- * v2: a 15-layer stack is only 1.78 world units deep, so the tilt does the
- * heavy lifting for "which plate is on top". 13° gives ~0.41 units (~24 CSS px)
- * of vertical parallax between the bottom and the top of a full stack while
- * keeping screw heads round enough to tap confidently.
+ * v3: the camera never moves (CONTRACT_V3 §1) — the assembly group under it
+ * does. A modest downward tilt still gives the object a "sitting on a bench"
+ * read; anything steeper starts to hide the faces the player is turning toward.
  */
-const CAMERA_TILT = THREE.MathUtils.degToRad(13);
+const CAMERA_TILT = THREE.MathUtils.degToRad(9);
 const CAMERA_FOV = 34;
 const FIT_MARGIN = 0.025;
 
@@ -20,19 +19,27 @@ const FIT_MARGIN = 0.025;
 const MAX_PIXEL_RATIO = 2;
 
 /**
- * Owns the WebGLRenderer, scene graph root, camera, lights and background.
- * Camera framing keeps VIEW_BOUNDS visible inside the container minus insets.
+ * Owns the WebGLRenderer, scene graph roots, camera, lights and background.
  *
- * There is deliberately no shadow map: at 0.12 layer spacing a depth-map
- * shadow either acnes or peter-pans, and a second pass over ~40 plates plus the
- * screw field costs more than the authored contact shadows in plateMesh.ts.
+ * Two roots, and the split is the whole architecture of v3:
+ *   - `assemblyRoot` holds the panels, the seated screw field and the hit
+ *     proxies. Its quaternion is driven by the drag gesture.
+ *   - `fixedRoot` holds the box row, the tray, screws in flight and panels that
+ *     have detached — everything that lives in world space and must NOT be
+ *     dragged around when the player turns the object.
+ *
+ * There is deliberately no shadow map: a second pass over 60 panels plus the
+ * screw field costs more than the lighting rig is worth, and a depth-map shadow
+ * on a body that spins in place either acnes or peter-pans at every angle.
  */
 export class SceneRig {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
-  /** Everything belonging to the current level goes here (cleared on loadLevel). */
-  readonly boardRoot = new THREE.Group();
+  /** Rotating assembly (CONTRACT_V3 §1). Cleared on loadLevel. */
+  readonly assemblyRoot = new THREE.Group();
+  /** Fixed world-space furniture: boxes, tray, flights. Cleared on loadLevel. */
+  readonly fixedRoot = new THREE.Group();
   readonly canvas: HTMLCanvasElement;
   readonly dirLight: THREE.DirectionalLight;
 
@@ -44,6 +51,8 @@ export class SceneRig {
   private readonly pit: THREE.Mesh;
   private readonly probe = new THREE.PerspectiveCamera(CAMERA_FOV, 1, 0.5, 100);
   private envTexture: THREE.Texture | null = null;
+  /** Projected pixel radius of the assembly's bounding sphere (drag gain). */
+  private radiusPx = 320;
 
   constructor(container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -69,18 +78,21 @@ export class SceneRig {
     this.camera.position.set(0, -3, 18);
     this.camera.lookAt(0, 0, 0);
     this.scene.add(this.camera);
-    this.scene.add(this.boardRoot);
+    this.assemblyRoot.name = 'assembly';
+    this.fixedRoot.name = 'fixed';
+    this.scene.add(this.assemblyRoot);
+    this.scene.add(this.fixedRoot);
 
-    // Lights. Total irradiance on an upward-facing surface is kept near 1.2 so
-    // plate colours never clip to white — with NoToneMapping, a blown-out top
-    // face destroys both the colour identity and the per-layer depth tint.
-    const hemi = new THREE.HemisphereLight(0xe4ecff, 0x232842, 0.34);
-    hemi.position.set(0, 0, 1);
+    // Lights. The object turns inside a fixed rig, so the whole front hemisphere
+    // has to be covered: a warm key from upper right, a cool rim from lower
+    // left, a soft camera-side fill that keeps a face turned flat-on from going
+    // muddy, and hemisphere ambient. Total irradiance on a camera-facing
+    // surface stays near 1.3 so panel colours never clip to white.
+    const hemi = new THREE.HemisphereLight(0xe4ecff, 0x232842, 0.38);
+    hemi.position.set(0, 1, 0);
     this.scene.add(hemi);
 
-    // Key light, deliberately grazing (z is only ~1.2x the xy reach) so plate
-    // sides catch light and the authored contact shadows have a real offset.
-    const dir = new THREE.DirectionalLight(0xfff4e6, 1.12);
+    const dir = new THREE.DirectionalLight(0xfff4e6, 1.02);
     dir.position.set(KEY_LIGHT.x, KEY_LIGHT.y, KEY_LIGHT.z);
     dir.target.position.set(0, 0, 0);
     dir.castShadow = false;
@@ -88,27 +100,33 @@ export class SceneRig {
     this.scene.add(dir.target);
     this.dirLight = dir;
 
-    // Cool rim from the opposite side: lights the *far* edge of every plate,
-    // which is what makes a 0.10-thick sheet read as a solid slab.
-    const rim = new THREE.DirectionalLight(0x9fc4ff, 0.5);
-    rim.position.set(-6.5, -4.5, 2.2);
+    // Cool rim from the opposite side: picks out the extruded side walls, which
+    // in v3 are a main surface rather than a 1 px sliver.
+    const rim = new THREE.DirectionalLight(0x9fc4ff, 0.52);
+    rim.position.set(-6.5, -4.5, 3.4);
     this.scene.add(rim);
 
-    // Background: a large vertex-coloured plane far behind the board.
+    // Head-on fill so a panel that turns square to the camera still separates
+    // from the panel behind it.
+    const fill = new THREE.DirectionalLight(0xcfe0ff, 0.26);
+    fill.position.set(-1.2, 1.6, 8);
+    this.scene.add(fill);
+
+    // Background: a large vertex-coloured plane far behind the assembly.
     this.ground = makeGround();
     this.scene.add(this.ground);
 
-    // A soft dark blob right behind the stack: gives the whole tower an
-    // ambient-occlusion "seat" so it does not float on the gradient.
+    // A soft dark blob behind the object so it has an ambient-occlusion "seat"
+    // instead of floating on the gradient.
     this.pit = makePit();
     this.scene.add(this.pit);
 
-    // Image-based lighting so metallic screws pick up reflections.
+    // Image-based lighting so metallic screws and brackets pick up reflections.
     try {
       const pmrem = new THREE.PMREMGenerator(this.renderer);
       this.envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
       this.scene.environment = this.envTexture;
-      this.scene.environmentIntensity = 0.22;
+      this.scene.environmentIntensity = 0.24;
       pmrem.dispose();
     } catch {
       /* environment is cosmetic; ignore failures (e.g. very old GPUs) */
@@ -127,6 +145,11 @@ export class SceneRig {
     this.renderer.setPixelRatio(Math.min(MAX_PIXEL_RATIO, window.devicePixelRatio || 1));
     this.renderer.setSize(this.width, this.height, false);
     this.frame();
+  }
+
+  /** Projected radius of the assembly in CSS pixels (drag gain, affordance ring). */
+  assemblyPixelRadius(): number {
+    return this.radiusPx;
   }
 
   render(): void {
@@ -197,19 +220,24 @@ export class SceneRig {
     }
     cam.position.set(0, targetY - dist * Math.sin(CAMERA_TILT), dist * Math.cos(CAMERA_TILT));
     cam.lookAt(0, targetY, 0);
-    // Tight near/far: the whole scene lives within ~9 units of the focus plane
-    // (plus the background quad). Keeping the range short buys depth precision
-    // for the 0.02-unit air gaps between stacked plates.
-    cam.near = Math.max(1, dist - 9);
-    cam.far = dist + 24;
+    // The assembly reaches 3 units toward the camera, so the near plane has to
+    // sit further back than in v2 while still keeping the range short.
+    cam.near = Math.max(1, dist - ASSEMBLY_RADIUS - 6);
+    cam.far = dist + 32;
     cam.updateProjectionMatrix();
     cam.updateMatrixWorld(true);
+
+    // Pixel radius of the bounding sphere: drag gain (orbit.ts) and the radius
+    // the off-screen-screw markers sit at.
+    const centre = new THREE.Vector3(0, 0, 0).project(cam);
+    const edge = new THREE.Vector3(ASSEMBLY_RADIUS, 0, 0).project(cam);
+    this.radiusPx = Math.max(40, Math.abs(edge.x - centre.x) * 0.5 * W);
   }
 }
 
 function makeGround(): THREE.Mesh {
-  const size = 44;
-  const geo = new THREE.PlaneGeometry(size, size, 1, 12);
+  const size = 70;
+  const geo = new THREE.PlaneGeometry(size, size, 1, 14);
   const pos = geo.attributes.position;
   const colors = new Float32Array(pos.count * 3);
   const top = new THREE.Color(0x2c3868);
@@ -217,8 +245,7 @@ function makeGround(): THREE.Mesh {
   const bottom = new THREE.Color(0x0e1224);
   const c = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
-    // map y ∈ [-size/2, size/2] but weight the gradient toward the visible band
-    const t = THREE.MathUtils.clamp((pos.getY(i) + 9) / 18, 0, 1);
+    const t = THREE.MathUtils.clamp((pos.getY(i) + 11) / 22, 0, 1);
     if (t < 0.5) c.lerpColors(bottom, mid, t * 2);
     else c.lerpColors(mid, top, (t - 0.5) * 2);
     colors[i * 3] = c.r;
@@ -233,12 +260,13 @@ function makeGround(): THREE.Mesh {
     envMapIntensity: 0.12,
   });
   const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.z = -1.1;
+  // Well behind the assembly, which now reaches z = -3.
+  mesh.position.z = -13;
   mesh.name = 'ground';
   return mesh;
 }
 
-/** Soft elliptical darkening behind the board so the stack has an AO "seat". */
+/** Soft elliptical darkening behind the object so it has an AO "seat". */
 function makePit(): THREE.Mesh {
   const size = 128;
   const canvas = document.createElement('canvas');
@@ -247,8 +275,8 @@ function makePit(): THREE.Mesh {
   const ctx = canvas.getContext('2d');
   if (ctx) {
     const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-    grad.addColorStop(0, 'rgba(0,0,0,0.62)');
-    grad.addColorStop(0.55, 'rgba(0,0,0,0.34)');
+    grad.addColorStop(0, 'rgba(0,0,0,0.6)');
+    grad.addColorStop(0.55, 'rgba(0,0,0,0.3)');
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, size, size);
@@ -260,8 +288,8 @@ function makePit(): THREE.Mesh {
     depthWrite: false,
     color: new THREE.Color(DEPTH_TINT).multiplyScalar(2),
   });
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(12.5, 13.5), mat);
-  mesh.position.set(-0.3, -0.35, -0.9);
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(13.5, 13.5), mat);
+  mesh.position.set(-0.4, -0.5, -5.5);
   mesh.name = 'pit';
   return mesh;
 }

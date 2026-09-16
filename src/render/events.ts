@@ -6,7 +6,8 @@ import { createBoxVisual } from './boxMesh';
 import { disposeScrewVisual } from './screwMesh';
 import {
   completeBox,
-  dropPlate,
+  detachScrew,
+  dropPanel,
   flyScrew,
   growTray,
   layoutBoxes,
@@ -21,7 +22,7 @@ import * as THREE from 'three';
 
 /**
  * Tracks in-flight animations per resource key ("screw:3", "box:2", "pos:1",
- * "plate:4", "tray") so events only wait for the animations they depend on.
+ * "panel:4", "tray") so events only wait for the animations they depend on.
  * This lets consecutive taps overlap while still keeping causal order.
  */
 class Scheduler {
@@ -93,7 +94,7 @@ export class EventPlayer {
     const gen = w.generation;
     const created: Promise<void>[] = [];
     let flightIndex = 0;
-    let lastPlateDrop: Promise<void> | null = null;
+    let lastPanelDrop: Promise<void> | null = null;
 
     let flightCount = 0;
     let finalTraySlots = w.traySlots.length;
@@ -145,12 +146,12 @@ export class EventPlayer {
           s.location = 'box';
           // Leave the instanced field now, not when the stagger delay expires,
           // so a staggered screw does not blink out while it waits its turn.
-          w.field.detach(s);
+          detachScrew(w, s);
           if (!b.screws.includes(s.id)) b.screws.push(s.id);
           const delay = flightIndex++ * flightStagger;
           let liftResolve: () => void = () => undefined;
           const lifted = new Promise<void>((r) => (liftResolve = r));
-          if (from === 'plate') this.sched.register([`plate:${s.plateId}`], lifted);
+          if (from === 'plate') this.sched.register([`panel:${s.panelId}`], lifted);
           const slot = ev.boxSlot;
           go(
             [`screw:${s.id}`, `box:${b.id}`, 'tray'],
@@ -163,13 +164,13 @@ export class EventPlayer {
           const s = w.screws.get(ev.screwId);
           if (!s) break;
           s.location = 'tray';
-          w.field.detach(s);
+          detachScrew(w, s);
           while (w.traySlots.length <= ev.traySlot) w.traySlots.push(null);
           w.traySlots[ev.traySlot] = s.id;
           const delay = flightIndex++ * flightStagger;
           let liftResolve: () => void = () => undefined;
           const lifted = new Promise<void>((r) => (liftResolve = r));
-          this.sched.register([`plate:${s.plateId}`], lifted);
+          this.sched.register([`panel:${s.panelId}`], lifted);
           const slot = ev.traySlot;
           go(
             [`screw:${s.id}`, 'tray'],
@@ -203,7 +204,7 @@ export class EventPlayer {
           const bv = createBoxVisual(state, x);
           bv.group.visible = false;
           bv.group.position.set(x, OFFSCREEN_Y, 0);
-          w.rig.boardRoot.add(bv.group);
+          w.rig.fixedRoot.add(bv.group);
           w.boxes.set(bv.id, bv);
           const posKey = `pos:${state.position}`;
           go([posKey], [`box:${bv.id}`, posKey], async () => {
@@ -212,12 +213,12 @@ export class EventPlayer {
           });
           break;
         }
-        case 'plateDrop': {
-          const pv = w.plates.get(ev.plateId);
+        case 'panelDrop': {
+          const pv = w.panels.get(ev.panelId);
           if (!pv || pv.dropped) break;
           pv.dropped = true;
           w.field.markDirty();
-          lastPlateDrop = go([`plate:${pv.id}`], [`plate:${pv.id}`], () => dropPlate(w, pv));
+          lastPanelDrop = go([`panel:${pv.id}`], [`panel:${pv.id}`], () => dropPanel(w, pv));
           break;
         }
         case 'screwsUnblocked': {
@@ -228,14 +229,14 @@ export class EventPlayer {
             ids.forEach((id, i) => {
               const s = w.screws.get(id);
               if (!s || s.location !== 'plate') return;
-              // The core is authoritative about reachability; trust it over the
-              // renderer's own geometric cover count.
-              s.coverCount = 0;
+              // The core is authoritative about reachability. The renderer only
+              // adds the front-facing test on top of it (CONTRACT_V3 §6).
+              s.blocked = false;
               runs.push(riseScrew(w, s, i * stagger));
             });
             w.field.markDirty();
             await Promise.all(runs);
-          }, lastPlateDrop);
+          }, lastPanelDrop);
           break;
         }
         case 'screwRevealed': {
@@ -244,7 +245,7 @@ export class EventPlayer {
           s.color = ev.color;
           s.revealed = true;
           const color = ev.color;
-          go([`screw:${s.id}`], [], () => revealScrew(w, s, color), lastPlateDrop);
+          go([`screw:${s.id}`], [], () => revealScrew(w, s, color), lastPanelDrop);
           break;
         }
         case 'traySlotAdded': {

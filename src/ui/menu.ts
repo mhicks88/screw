@@ -50,7 +50,7 @@ export function createMenu(handlers: MenuHandlers): MenuScreen {
         draggable: 'false',
       }),
       h('h1', { class: 'menu-title' }, 'SCREWDOM', h('small', null, '3D')),
-      h('p', { class: 'menu-tagline' }, 'Unscrew. Sort. Drop the plates.'),
+      h('p', { class: 'menu-tagline' }, 'Unscrew. Sort. Take it apart.'),
     ),
     h(
       'div',

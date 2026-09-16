@@ -901,6 +901,95 @@ svg {
   transform: translateX(-50%) translateY(-6px);
 }
 
+/* "Drag to turn the model" coach mark ------------------------------------ *
+ * First-run only. pointer-events: none, so it can never swallow a tap on a
+ * screw or the start of the very drag it is asking for.                     */
+
+.coach-mark {
+  position: absolute;
+  left: 50%;
+  bottom: 150px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  /* Shrink-to-fit: an absolutely positioned flex box anchored at left:50% would
+     otherwise only get half the viewport and wrap the copy to four lines. */
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--gutter));
+  padding: 11px 20px 11px 15px;
+  border-radius: 22px;
+  background: rgba(10, 13, 26, 0.88);
+  box-shadow: var(--shadow), inset 0 0 0 1px var(--line-2);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateX(-50%) translateY(10px);
+  transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.coach-mark.show {
+  opacity: 1;
+  transform: translateX(-50%);
+}
+.coach-mark .cm-ico svg {
+  width: 46px;
+  height: 32px;
+  flex: none;
+  color: var(--accent-2);
+}
+.coach-mark .cm-dot {
+  animation: cm-sweep 2.6s ease-in-out infinite;
+}
+.coach-mark .cm-arc {
+  animation: cm-arc 2.6s ease-in-out infinite;
+}
+.coach-mark .cm-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.coach-mark .cm-copy b {
+  font-size: 15px;
+  font-weight: 900;
+  color: var(--text);
+}
+.coach-mark .cm-copy small {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+}
+@keyframes cm-sweep {
+  0%,
+  10% {
+    transform: translateX(8px);
+  }
+  45%,
+  55% {
+    transform: translateX(-8px);
+  }
+  90%,
+  100% {
+    transform: translateX(8px);
+  }
+}
+@keyframes cm-arc {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .coach-mark .cm-dot,
+  .coach-mark .cm-arc {
+    animation: none;
+  }
+}
+
 /* Loading a level -------------------------------------------------------- *
  * Generation can take ~2 s, so the tap that starts a level immediately gets
  * a skeleton board, the level number and a spinner that keeps moving.        */
@@ -925,58 +1014,70 @@ svg {
   inset: calc(var(--sat) + 80px) 26px calc(var(--sab) + 96px);
   opacity: 0.4;
 }
-.ld-plate {
+/* A rough machine silhouette: nested shells with brackets bolted across them,
+   not the flat plate stack v2 used. */
+.ld-panel {
   position: absolute;
-  border-radius: 26px;
+  border-radius: 22px;
   background: linear-gradient(180deg, #262c58, #1a1f3c);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
   animation: ld-breathe 2.4s ease-in-out infinite;
 }
-.ld-plate.p0 {
-  left: 2%;
-  top: 4%;
-  width: 56%;
-  height: 26%;
+.ld-panel.p0 {
+  left: 50%;
+  top: 50%;
+  width: 78%;
+  height: 46%;
+  transform: translate(-50%, -50%) rotate(-7deg);
 }
-.ld-plate.p1 {
-  right: 3%;
-  top: 10%;
-  width: 40%;
-  height: 20%;
+.ld-panel.p1 {
+  left: 50%;
+  top: 50%;
+  width: 58%;
+  height: 34%;
+  border-radius: 18px;
+  transform: translate(-50%, -50%) rotate(9deg);
 }
-.ld-plate.p2 {
-  left: 10%;
-  top: 35%;
-  width: 46%;
-  height: 24%;
-}
-.ld-plate.p3 {
-  right: 6%;
-  top: 38%;
-  width: 36%;
-  height: 30%;
-}
-.ld-plate.p4 {
-  left: 4%;
-  bottom: 6%;
-  width: 52%;
-  height: 24%;
-}
-.ld-plate.p5 {
-  right: 8%;
-  bottom: 9%;
+.ld-panel.p2 {
+  left: 50%;
+  top: 50%;
   width: 34%;
-  height: 18%;
+  height: 20%;
+  border-radius: 14px;
+  transform: translate(-50%, -50%) rotate(-3deg);
 }
+.ld-panel.p3 {
+  left: 6%;
+  top: 22%;
+  width: 26%;
+  height: 9%;
+  border-radius: 10px;
+  transform: rotate(-18deg);
+}
+.ld-panel.p4 {
+  right: 7%;
+  bottom: 24%;
+  width: 30%;
+  height: 9%;
+  border-radius: 10px;
+  transform: rotate(14deg);
+}
+.ld-panel.p5 {
+  left: 50%;
+  bottom: 9%;
+  width: 46%;
+  height: 8%;
+  border-radius: 10px;
+  transform: translateX(-50%) rotate(-4deg);
+}
+/* Opacity only: the per-panel `transform` carries each panel's own rotation. */
 @keyframes ld-breathe {
   0%,
   100% {
     opacity: 0.35;
-    transform: translateY(0);
   }
   50% {
     opacity: 0.75;
-    transform: translateY(-5px);
   }
 }
 .ld-card {

@@ -5,21 +5,39 @@ import type { World } from './world';
 import { isAlive } from './world';
 import type { ScrewVisual } from './screwMesh';
 import { applyScrewColor, disposeScrewVisual, flashMaterial, screwMaterial } from './screwMesh';
-import type { PlateVisual } from './plateMesh';
-import { disposePlateVisual } from './plateMesh';
+import type { PanelVisual } from './panelMesh';
+import { disposePanelVisual, makePanelMaterialUnique } from './panelMesh';
 import type { BoxVisual } from './boxMesh';
 import { disposeBoxVisual, setBoxColor } from './boxMesh';
 import { rebuildTray } from './trayMesh';
 import { BOX_HEIGHT, BOX_Y, OFFSCREEN_Y, boxPositionsX, trayPositionsX, trayWidth } from './layout';
 
+/**
+ * Move a screw out of the instanced field into world space.
+ *
+ * The moment a screw starts to fly it stops belonging to the assembly: the
+ * boxes and the tray are fixed in world space and the player may well keep
+ * spinning the object while the screw is in the air (CONTRACT_V3 §6). Its pose
+ * is frozen through the assembly's current world matrix and it is re-parented
+ * to the fixed root, so later rotation cannot drag it around.
+ */
+export function detachScrew(w: World, s: ScrewVisual): THREE.Group {
+  w.rig.assemblyRoot.updateMatrixWorld(true);
+  return w.field.detach(s, w.rig.fixedRoot, w.rig.assemblyRoot.matrixWorld);
+}
+
 export interface FlightOptions {
   from: 'plate' | 'tray';
   delay?: number;
-  /** Fired once the screw has unscrewed and lifted off its plate. */
+  /** Fired once the screw has unscrewed and lifted off its panel. */
   onLifted?: () => void;
 }
 
-/** Unscrew (spin + lift), arc to the target, screw in. Target is re-read every frame. */
+/**
+ * Unscrew ALONG THE SCREW'S OWN AXIS (v2 always lifted toward +z, which on a
+ * solid would push half the screws into the panel they sit on), then arc to the
+ * target and screw in. The target is re-read every frame because boxes slide.
+ */
 export async function flyScrew(
   w: World,
   s: ScrewVisual,
@@ -27,31 +45,41 @@ export async function flyScrew(
   opts: FlightOptions,
 ): Promise<void> {
   const gen = w.generation;
-  // A flying screw needs its own transform, so it leaves the instanced field.
-  const g = w.field.detach(s);
+  const g = detachScrew(w, s);
   if (opts.delay) await w.tweens.delay(opts.delay);
   if (!isAlive(w, gen)) return;
-  if (g.parent !== w.rig.boardRoot) w.rig.boardRoot.attach(g);
+  if (g.parent !== w.rig.fixedRoot) w.rig.fixedRoot.attach(g);
   g.scale.setScalar(1);
 
   const start = g.position.clone();
-  const rot0 = g.rotation.z;
+  const q0 = g.quaternion.clone();
+  // World-space withdrawal direction, sampled ONCE at launch.
+  const outAxis = new THREE.Vector3(0, 0, 1).applyQuaternion(g.quaternion).normalize();
+  const spinQ = new THREE.Quaternion();
   const fromPlate = opts.from === 'plate';
-  const lift = fromPlate ? 0.75 : 0.5;
+  const lift = fromPlate ? 0.78 : 0.5;
   await w.tweens.run({
-    duration: fromPlate ? 175 : 130,
+    duration: fromPlate ? 180 : 130,
     ease: Easing.inOutQuad,
     onUpdate: (e, raw) => {
-      g.position.z = start.z + lift * e;
-      g.rotation.z = rot0 + Math.PI * 4 * raw;
+      g.position.copy(start).addScaledVector(outAxis, lift * e);
+      spinQ.setFromAxisAngle(outAxis, Math.PI * 4 * raw);
+      g.quaternion.copy(spinQ).multiply(q0);
     },
   });
   if (!isAlive(w, gen)) return;
   opts.onLifted?.();
 
+  // From here the screw is a world-space object flying to a world-space slot;
+  // it turns to point at the camera (+z) so the head faces the player as it
+  // drops into the hole.
   const p0 = g.position.clone();
   const p1 = new THREE.Vector3();
   const p2 = new THREE.Vector3();
+  const qAir = new THREE.Quaternion();
+  const qFlat = new THREE.Quaternion();
+  const xAxis = new THREE.Vector3(1, 0, 0);
+  const q1 = g.quaternion.clone();
   const dirSign = Math.sign(getTarget().y - p0.y) || 1;
   await w.tweens.run({
     duration: 340,
@@ -62,90 +90,100 @@ export async function flyScrew(
       p1.lerpVectors(p0, p2, 0.5);
       p1.z = Math.max(p0.z, p2.z) + 2.3;
       quadBezier(p0, p1, p2, e, g.position);
-      g.rotation.z += 0.1;
-      g.rotation.x = Math.sin(e * Math.PI) * 0.3 * dirSign;
+      qFlat.setFromAxisAngle(xAxis, Math.sin(e * Math.PI) * 0.3 * dirSign);
+      qAir.slerpQuaternions(q1, qFlat, Math.min(1, e * 1.4));
+      g.quaternion.copy(qAir);
     },
   });
   if (!isAlive(w, gen)) return;
 
   const s0 = g.position.clone();
-  const rot1 = g.rotation.z;
+  const q2 = g.quaternion.clone();
+  const spin2 = new THREE.Quaternion();
+  const zAxis = new THREE.Vector3(0, 0, 1);
   await w.tweens.run({
     duration: 160,
     ease: Easing.outQuad,
     onUpdate: (e, raw) => {
       g.position.lerpVectors(s0, getTarget(), e);
-      g.rotation.z = rot1 - Math.PI * 3 * raw;
-      g.rotation.x = 0;
+      spin2.setFromAxisAngle(zAxis, -Math.PI * 3 * raw);
+      g.quaternion.copy(spin2).multiply(q2);
       const sq = 1 + 0.1 * Math.sin(raw * Math.PI);
       g.scale.set(sq, sq, 1 / sq);
     },
   });
   if (!isAlive(w, gen)) return;
   g.position.copy(getTarget());
-  g.rotation.set(0, 0, 0);
+  g.quaternion.identity();
   g.scale.setScalar(1);
+  s.pos.copy(g.position);
+  s.worldQuat.copy(g.quaternion);
 }
 
 /**
- * Plate releases toward the camera, tilts and falls out of the bottom of the
- * screen while fading.
+ * The panel unbolts, pushes away from the body of the assembly and tumbles out
+ * of the bottom of the screen while fading.
  *
- * v2: plates are 0.10 thin sheets stacked 0.12 apart, so the old "slide down and
- * away from the camera" read as the plate sinking *into* the stack. It now pops
- * forward (+z) first and keeps moving toward the camera as it falls, which
- * separates it from the layers it used to sit between even in a fast cascade.
+ * It is re-parented into world space first (keeping its current world pose), so
+ * a panel that comes off while the player is mid-drag falls straight down the
+ * screen instead of being whipped around by the rotation it just left.
  */
-export async function dropPlate(w: World, pv: PlateVisual): Promise<void> {
+export async function dropPanel(w: World, pv: PanelVisual): Promise<void> {
   const gen = w.generation;
   const m = pv.mesh;
-  const mat = m.material;
-  const shadowMat = pv.shadow.material;
-  const shadow0 = shadowMat.opacity;
+  w.rig.assemblyRoot.updateMatrixWorld(true);
+  w.rig.fixedRoot.attach(m);
+  const mat = makePanelMaterialUnique(pv);
   mat.transparent = true;
   mat.needsUpdate = true;
-  const y0 = m.position.y;
-  const z0 = m.position.z;
-  const rx0 = m.rotation.x;
-  const rz0 = m.rotation.z;
-  const spin = (Math.random() - 0.5) * 0.75;
+
+  // "Away from the assembly", expressed in world space at the moment it frees.
+  const push = pv.outward.clone().applyQuaternion(w.rig.assemblyRoot.quaternion).normalize();
+  if (push.z < 0.12) push.z += 0.45; // always come toward the camera a little
+  push.normalize();
+
+  const p0 = m.position.clone();
+  const q0 = m.quaternion.clone();
+  const tumbleAxis = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize();
+  const tumble = new THREE.Quaternion();
   m.renderOrder = 5;
 
-  // Release pop: the sheet unsticks from the stack.
+  // Release pop: the panel unsticks from the body.
   await w.tweens.run({
-    duration: 110,
+    duration: 120,
     ease: Easing.outQuad,
     onUpdate: (e) => {
-      m.position.z = z0 + 0.22 * e;
-      const k = 1 + 0.035 * e;
-      m.scale.set(k, k, 1);
-      shadowMat.opacity = shadow0 * (1 - 0.7 * e);
+      m.position.copy(p0).addScaledVector(push, 0.3 * e);
+      const k = 1 + 0.03 * e;
+      m.scale.set(k, k, k);
     },
   });
   if (!isAlive(w, gen)) return;
 
+  const p1 = m.position.clone();
   await w.tweens.run({
-    duration: 520,
+    duration: 540,
     ease: Easing.inQuad,
     onUpdate: (e, raw) => {
-      m.position.y = y0 - 11 * e;
-      m.position.z = z0 + 0.22 + 0.75 * e;
-      m.rotation.x = rx0 - 1.15 * raw;
-      m.rotation.z = rz0 + spin * raw;
+      m.position.copy(p1).addScaledVector(push, 0.85 * e);
+      m.position.y = p1.y + push.y * 0.85 * e - 11 * e;
+      tumble.setFromAxisAngle(tumbleAxis, 1.5 * raw);
+      m.quaternion.copy(tumble).multiply(q0);
       mat.opacity = 1 - Math.max(0, raw - 0.25) / 0.75;
-      shadowMat.opacity = shadow0 * 0.3 * (1 - raw);
     },
   });
   if (!isAlive(w, gen)) return;
-  disposePlateVisual(pv);
-  w.plates.delete(pv.id);
-  w.recomputeCover();
+  disposePanelVisual(pv);
+  w.panels.delete(pv.id);
+  w.invalidate();
 }
 
-/** Side-to-side shake + white flash (blocked tap). */
+/** Side-to-side shake across the screw's own face + white flash (blocked tap). */
 export async function shakeScrew(w: World, s: ScrewVisual): Promise<void> {
   const gen = w.generation;
-  const x0 = s.pos.x;
+  const home = s.pos.clone();
+  // Shake across the face the screw sits on, not along some global axis.
+  const side = new THREE.Vector3(1, 0, 0).applyQuaternion(s.quat).normalize();
   const flash = flashMaterial();
   s.flash = true;
   w.field.setColor(s);
@@ -154,7 +192,7 @@ export async function shakeScrew(w: World, s: ScrewVisual): Promise<void> {
     duration: 260,
     ease: Easing.linear,
     onUpdate: (e) => {
-      s.pos.x = x0 + Math.sin(e * Math.PI * 5) * 0.11 * (1 - e);
+      s.pos.copy(home).addScaledVector(side, Math.sin(e * Math.PI * 5) * 0.11 * (1 - e));
       w.field.setPose(s);
       if (e > 0.35 && s.flash) {
         s.flash = false;
@@ -165,7 +203,7 @@ export async function shakeScrew(w: World, s: ScrewVisual): Promise<void> {
   });
   s.flash = false;
   if (!isAlive(w, gen)) return;
-  s.pos.x = x0;
+  s.pos.copy(home);
   w.field.setPose(s);
   w.field.setColor(s);
   applyScrewColor(s, s.color, s.revealed);
@@ -189,12 +227,12 @@ export function popScrew(w: World, s: ScrewVisual, amount = 0.22, duration = 260
 }
 
 /**
- * A screw that has just been uncovered rises out of the stack: a short lift plus
- * the scale bump. At 0.12 layer spacing the pure scale pop was too subtle to
- * notice among 20 other screws.
+ * A screw that has just been uncovered rises a little ALONG ITS OWN AXIS plus
+ * the scale bump, so the cue reads the same whether the face it sits on points
+ * at the camera or off to the side.
  */
 export function riseScrew(w: World, s: ScrewVisual, delay = 0): Promise<void> {
-  const z0 = s.home.z;
+  const home = s.home.clone();
   return w.tweens.run({
     duration: 300,
     delay,
@@ -202,12 +240,12 @@ export function riseScrew(w: World, s: ScrewVisual, delay = 0): Promise<void> {
     onUpdate: (e) => {
       const k = Math.sin(e * Math.PI);
       s.scale = 1 + 0.26 * k;
-      s.pos.z = z0 + 0.11 * k;
+      s.pos.copy(home).addScaledVector(s.axis, 0.11 * k);
       w.field.setPose(s);
     },
     onComplete: () => {
       s.scale = 1;
-      s.pos.z = z0;
+      s.pos.copy(home);
       w.field.setPose(s);
     },
   });
@@ -252,9 +290,7 @@ export async function spawnBox(w: World, bv: BoxVisual, targetX: number): Promis
 /**
  * Bounce, drop the lid, slide off the top of the screen, dispose box + its
  * screws. `onVacated` fires the moment the box starts leaving, so the next box
- * can slide into the same position while this one is still on its way out —
- * at v2 scale a magnet or a cascade completes several boxes per position and
- * fully serialising them was the single biggest stall in a long batch.
+ * can slide into the same position while this one is still on its way out.
  */
 export async function completeBox(w: World, bv: BoxVisual, onVacated?: () => void): Promise<void> {
   const gen = w.generation;

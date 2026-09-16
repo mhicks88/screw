@@ -1,17 +1,40 @@
 /**
  * Shared game contract for Screwdom 3D.
  *
- * Coordinate system (board space):
- *   - 2D plane, +x right, +y up (toward the boxes / top of the phone).
- *   - Playable board area is roughly x in [-3, 3], y in [-4.2, 4.2].
- *   - Plates live on integer `layer`s; 0 is the bottom (farthest from camera),
- *     higher layers are stacked on top (closer to the camera).
- *   - Plates on the same layer never overlap.
+ * The board is a SOLID 3D ASSEMBLY (CONTRACT_V3): machine-like panels,
+ * brackets and struts bolted onto a frame in nested shells, with screws on
+ * faces pointing in many directions. The player rotates the object to reach
+ * them.
+ *
+ * Coordinate system (assembly space):
+ *   - Right-handed 3D, +x right, +y up, +z toward the camera at identity
+ *     rotation. The assembly is centred on the origin and fits inside a
+ *     bounding sphere of radius ASSEMBLY_RADIUS, so it stays framed from any
+ *     angle with the boxes row above it and the tray row below it.
+ *   - THE OBJECT ROTATES, NOT THE CAMERA. Everything belonging to the assembly
+ *     lives under one group whose quaternion the drag gesture drives; the
+ *     camera, lights, box row and tray row are fixed. The core never knows the
+ *     camera orientation.
+ *   - A panel is a 2D outline (`PlateShape`, still the source of truth for hit
+ *     testing) extruded along its own local +Z from z = 0 to z = `thickness`,
+ *     then placed in assembly space by `rotation` (a unit quaternion) and
+ *     `position` (the panel-local origin).
+ *   - `shell` is the nesting depth: 0 is the outermost shell, higher numbers
+ *     are further in. Outer shells cover inner ones.
  *
  * Rules summary:
- *   - Each screw belongs to exactly one plate and sits at a world position.
- *   - A screw is BLOCKED if any non-dropped plate on a HIGHER layer covers its
- *     world position. Otherwise it is REACHABLE and may be tapped.
+ *   - Each screw belongs to exactly one panel, sits at a world position on one
+ *     of that panel's faces, and withdraws ALONG `axis` (a unit vector, the
+ *     outward normal of the face it sits on).
+ *   - A screw is BLOCKED when the ray from `position` along `axis` (started a
+ *     hair along the axis so a screw never blocks itself) passes through any
+ *     panel that has not yet dropped, other than the screw's own panel.
+ *     Otherwise it is REACHABLE and may be tapped. Because panels never move,
+ *     the set of panels a screw's ray crosses is static: only their dropped
+ *     flags change.
+ *   - REMOVABLE IS NOT THE SAME AS TAPPABLE. The core decides removable; the
+ *     renderer decides what is currently on screen and facing the camera.
+ *     Rotating is how the player reaches removable screws on faces turned away.
  *   - Tapping a reachable screw removes it. If an active box of the same colour
  *     has room it flies into that box; otherwise it goes to the first free
  *     tray slot. If the tray is full, the tap is refused with `reason: 'trayFull'`
@@ -21,19 +44,21 @@
  *     the next box from the level's `boxQueue` slides into its place. Screws
  *     waiting in the tray that match the new box are moved into it automatically
  *     (oldest tray slot first) — this can chain if the new box fills up.
- *   - When every screw on a plate has been removed the plate drops away, which
- *     may unblock screws on lower plates.
+ *   - When every screw on a panel has been removed the panel falls away, which
+ *     may unblock screws behind it (on inner shells, on struts, anywhere its
+ *     body used to stand in the way).
  *   - The level is won when all screws are gone.
  *
  * Power-ups (all free & unlimited in this build):
- *   - drill:     remove ANY screw, even a blocked one (it still needs box/tray room)
+ *   - drill:     remove ANY screw, even one whose withdrawal path is obstructed
+ *                (it still needs box/tray room)
  *   - addSlot:   add one temporary tray slot (up to MAX_BONUS_SLOTS per level)
  *   - addBox:    add an extra active box whose colour is chosen to help most
  *                (colour with the most screws in tray+reachable, capped at BOX_CAPACITY per level)
  *   - recolor:   change the colour of the active box that is emptiest to the colour
  *                that is most represented in the tray (or reachable screws). Screws
  *                already in that box are returned to the pool: they are re-hidden
- *                back onto their plates? NO — simpler rule: recolor is only allowed
+ *                back onto their panels? NO — simpler rule: recolor is only allowed
  *                on an EMPTY active box. If no active box is empty the power-up is
  *                refused with reason 'noEmptyBox'.
  *   - magnet:    pull every reachable screw matching any active box colour into
@@ -46,6 +71,12 @@ export const BOX_CAPACITY = 3;
 export const BASE_TRAY_SLOTS = 5;
 export const MAX_BONUS_SLOTS = 3;
 export const MAX_ACTIVE_BOXES = 4;
+
+/**
+ * Every panel of an assembly lies inside this sphere around the origin
+ * (CONTRACT_V3 §1), so the object stays framed at any rotation.
+ */
+export const ASSEMBLY_RADIUS = 3.0;
 
 /** Screw colour ids. Renderer maps these to hex colours (see COLOR_HEX). */
 export type ScrewColor =
@@ -86,27 +117,32 @@ export interface PlateShape {
 
 export interface Vec2 { x: number; y: number }
 
-export interface PlateDef {
+export interface Vec3 { x: number; y: number; z: number }
+/** Unit quaternion. */
+export interface Quat { x: number; y: number; z: number; w: number }
+
+export interface PanelDef {
   id: number;
-  layer: number;
+  /** 2D outline in the panel's own plane (local XY), extruded along local +Z. */
   shape: PlateShape;
-  /** World position of the plate's local origin. */
-  x: number;
-  y: number;
-  /** Rotation in radians (CCW) applied to the local shape around (x, y). */
-  rotation: number;
-  /** Hex colour for the plate body. */
+  thickness: number;
+  /** Panel-local origin in assembly space. */
+  position: Vec3;
+  /** Orientation of the panel's local frame in assembly space. */
+  rotation: Quat;
   color: number;
-  /** Cosmetic material hint. */
   material: 'plastic' | 'wood' | 'metal';
+  /** Nesting depth, 0 = outermost shell. A hint for tinting and generation. */
+  shell: number;
 }
 
 export interface ScrewDef {
   id: number;
-  plateId: number;
-  /** WORLD position (already transformed). */
-  x: number;
-  y: number;
+  panelId: number;
+  /** Screw head position in assembly space. */
+  position: Vec3;
+  /** Unit vector the screw withdraws ALONG (outward from its panel face). */
+  axis: Vec3;
   color: ScrewColor;
   /**
    * Mystery screw: its colour is unknown to the player (rendered grey with '?')
@@ -120,7 +156,7 @@ export interface LevelDef {
   level: number;
   /** Seed actually used (after solvability retries). */
   seed: number;
-  plates: PlateDef[];
+  panels: PanelDef[];
   screws: ScrewDef[];
   /**
    * Full ordered queue of box colours. The first `activeBoxCount` entries are
@@ -145,11 +181,11 @@ export type ScrewLocation = 'plate' | 'tray' | 'box' | 'gone';
 export interface ScrewState {
   id: number;
   color: ScrewColor;
-  plateId: number;
+  panelId: number;
   location: ScrewLocation;
   /** True when the colour is visible to the player. Always true for non-hidden screws. */
   revealed: boolean;
-  /** Blocked by a plate above (only meaningful while location === 'plate'). */
+  /** Withdrawal path obstructed by a panel (only meaningful while location === 'plate'). */
   blocked: boolean;
   /** Tray slot index while location === 'tray'. */
   traySlot?: number;
@@ -170,7 +206,7 @@ export interface BoxState {
   completed: boolean;
 }
 
-export interface PlateState {
+export interface PanelState {
   id: number;
   dropped: boolean;
   /** Screws still attached (ids). */
@@ -183,7 +219,7 @@ export interface GameSnapshot {
   level: LevelDef;
   status: GameStatus;
   screws: ScrewState[];
-  plates: PlateState[];
+  panels: PanelState[];
   /** Active boxes, ordered by `position`. */
   boxes: BoxState[];
   /** Index into level.boxQueue of the next box to spawn. */
@@ -203,16 +239,16 @@ export interface GameSnapshot {
 /* ------------------------------------------------------------------------ */
 
 export type GameEvent =
-  /** A screw left its plate and flew into a box. */
+  /** A screw left its panel and flew into a box. */
   | { type: 'screwToBox'; screwId: number; boxId: number; boxSlot: number; from: 'plate' | 'tray' }
-  /** A screw left its plate and went to a tray slot. */
+  /** A screw left its panel and went to a tray slot. */
   | { type: 'screwToTray'; screwId: number; traySlot: number }
   /** A box reached capacity and leaves the screen. */
   | { type: 'boxComplete'; boxId: number; position: number }
   /** A new box slides into `position`. */
   | { type: 'boxSpawn'; box: BoxState }
-  /** A plate has no screws left and falls away. */
-  | { type: 'plateDrop'; plateId: number }
+  /** A panel has no screws left and falls away. */
+  | { type: 'panelDrop'; panelId: number }
   /** Previously blocked screws are now reachable (may also reveal mystery screws). */
   | { type: 'screwsUnblocked'; screwIds: number[] }
   /** A mystery screw's colour became visible. */

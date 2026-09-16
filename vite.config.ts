@@ -24,7 +24,7 @@ export default defineConfig({
       manifest: {
         name: 'Screwdom 3D',
         short_name: 'Screwdom',
-        description: 'A relaxing screw-puzzle: unscrew, sort by colour, drop the plates.',
+        description: 'A relaxing 3D screw-puzzle: turn the model, unscrew, sort by colour.',
         display: 'standalone',
         orientation: 'portrait',
         start_url: base,

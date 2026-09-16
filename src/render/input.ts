@@ -10,19 +10,41 @@ export interface InputOptions {
   onTap: (screwId: number) => void;
   /** Called on pointer down with the screw under the finger (or null) for instant feedback. */
   onPress?: (screwId: number | null) => void;
+  /** The gesture turned into a rotation (the 12 px threshold was crossed). */
+  onDragStart?: () => void;
+  /** Incremental pointer movement in CSS px while rotating. */
+  onDrag?: (dx: number, dy: number, dtMs: number) => void;
+  onDragEnd?: () => void;
 }
 
 const DRAG_CANCEL_PX = 12;
 
 /**
- * Pointer handling for the canvas. The screw is resolved by raycast on
- * pointerdown (instant feedback), the tap is committed on pointerup unless the
- * pointer moved more than 12 px in between.
+ * Pointer handling for the canvas.
+ *
+ * One finger does both jobs (CONTRACT_V3 §5): the screw under the finger is
+ * resolved on pointerdown for instant feedback, and the gesture commits as a
+ * TAP on pointerup — unless the pointer travelled more than 12 px first, in
+ * which case it becomes a ROTATE and keeps feeding deltas to the orbit
+ * controller until release. The threshold is the same 12 px v2 already used to
+ * cancel a tap, so nothing about the feel of tapping changes.
+ *
+ * A drag anywhere rotates, including one that started on a screw: the player
+ * should never have to hunt for empty background to turn the object.
  */
 export class InputHandler {
   private readonly raycaster = new THREE.Raycaster();
   private readonly ndc = new THREE.Vector2();
-  private active: { pointerId: number; x: number; y: number; screwId: number | null } | null = null;
+  private active: {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    lastX: number;
+    lastY: number;
+    lastMs: number;
+    screwId: number | null;
+    dragging: boolean;
+  } | null = null;
   private readonly opts: InputOptions;
   private readonly onDown = (e: PointerEvent) => this.pointerDown(e);
   private readonly onMove = (e: PointerEvent) => this.pointerMove(e);
@@ -69,17 +91,10 @@ export class InputHandler {
     this.raycaster.setFromCamera(this.ndc, this.opts.camera);
     const hits = this.raycaster.intersectObjects(this.opts.hitTargets(), false);
     if (hits.length === 0) return null;
-    // Topmost layer wins; ties resolved by ray distance (closest first).
+    // Nearest to the camera wins: on a solid, the screw in front is the one the
+    // player can see and therefore the one they meant.
     let best = hits[0];
-    let bestLayer = (best.object.userData.layer as number | undefined) ?? 0;
-    for (let i = 1; i < hits.length; i++) {
-      const h = hits[i];
-      const layer = (h.object.userData.layer as number | undefined) ?? 0;
-      if (layer > bestLayer || (layer === bestLayer && h.distance < best.distance)) {
-        best = h;
-        bestLayer = layer;
-      }
-    }
+    for (let i = 1; i < hits.length; i++) if (hits[i].distance < best.distance) best = hits[i];
     const id = best.object.userData.screwId;
     return typeof id === 'number' ? id : null;
   }
@@ -87,9 +102,18 @@ export class InputHandler {
   private pointerDown(e: PointerEvent): void {
     if (!this.enabled) return;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (this.active) return; // ignore multi-touch
+    if (this.active) return; // ignore multi-touch: one finger rotates
     const screwId = this.pick(e.clientX, e.clientY);
-    this.active = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, screwId };
+    this.active = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      lastMs: e.timeStamp || performance.now(),
+      screwId,
+      dragging: false,
+    };
     try {
       this.opts.canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -101,13 +125,25 @@ export class InputHandler {
 
   private pointerMove(e: PointerEvent): void {
     const a = this.active;
-    if (!a || a.pointerId !== e.pointerId || a.screwId === null) return;
-    const dx = e.clientX - a.x;
-    const dy = e.clientY - a.y;
-    if (dx * dx + dy * dy > DRAG_CANCEL_PX * DRAG_CANCEL_PX) {
+    if (!a || a.pointerId !== e.pointerId || !this.enabled) return;
+    const now = e.timeStamp || performance.now();
+    if (!a.dragging) {
+      const dx = e.clientX - a.startX;
+      const dy = e.clientY - a.startY;
+      if (dx * dx + dy * dy <= DRAG_CANCEL_PX * DRAG_CANCEL_PX) return;
+      // Crossed the threshold: this is a rotation, not a tap.
+      a.dragging = true;
       a.screwId = null;
       this.opts.onPress?.(null);
+      this.opts.onDragStart?.();
+      // Hand over the whole movement so far, so the object does not jump.
+      this.opts.onDrag?.(dx, dy, Math.max(1, now - a.lastMs));
+    } else {
+      this.opts.onDrag?.(e.clientX - a.lastX, e.clientY - a.lastY, Math.max(1, now - a.lastMs));
     }
+    a.lastX = e.clientX;
+    a.lastY = e.clientY;
+    a.lastMs = now;
   }
 
   private pointerUp(e: PointerEvent): void {
@@ -115,7 +151,11 @@ export class InputHandler {
     if (!a || a.pointerId !== e.pointerId) return;
     this.active = null;
     this.release(e.pointerId);
-    if (a.screwId !== null && this.enabled) this.opts.onTap(a.screwId);
+    if (a.dragging) {
+      this.opts.onDragEnd?.();
+    } else if (a.screwId !== null && this.enabled) {
+      this.opts.onTap(a.screwId);
+    }
     this.opts.onPress?.(null);
   }
 
@@ -124,6 +164,7 @@ export class InputHandler {
     if (!a || a.pointerId !== e.pointerId) return;
     this.active = null;
     this.release(e.pointerId);
+    if (a.dragging) this.opts.onDragEnd?.();
     this.opts.onPress?.(null);
   }
 

@@ -1,12 +1,12 @@
 /**
  * Bot used to prove levels are winnable (and to gauge difficulty):
  *   1. if a reachable screw matches an active box with room, take it — preferring
- *      the fullest box, and among equals the screw that brings a plate closest to
- *      dropping (clearing a plate out is what keeps new screws arriving, and it
+ *      the fullest box, and among equals the screw that brings a panel closest to
+ *      dropping (clearing a panel out is what keeps new screws arriving, and it
  *      is what a human does);
  *   2. otherwise, if the tray has room, park a reachable screw there. The choice
- *      is human-like but greedy: prefer screws whose plate is nearly empty
- *      (dropping it unblocks things), especially when that plate covers screws
+ *      is human-like but greedy: prefer screws whose panel is nearly empty
+ *      (dropping it unblocks things), especially when that panel covers screws
  *      of an active box colour, and prefer colours already accumulating in the
  *      tray (a lazily spawned box of that colour then chains them out). A dose
  *      of randomness keeps play-throughs varied;
@@ -30,7 +30,7 @@ export interface BotResult {
   peakTray: number;
   /** With `trace`: reachable screw count before each move (CONTRACT_V2 §5). */
   reachPerStep?: number[];
-  /** With `trace`: number of distinct plates holding a reachable screw. */
+  /** With `trace`: number of distinct panels holding a reachable screw. */
   frontsPerStep?: number[];
   /** With `trace`: the screw ids tapped, in order (a replayable winning line). */
   picks?: number[];
@@ -66,7 +66,9 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
     ...(opts.trace ? { reachPerStep, frontsPerStep, picks, boxColorsPerStep } : {}),
   });
   const level = game.level;
-  const plateById = new Map(level.plates.map((p) => [p.id, p]));
+  const panelById = new Map(level.panels.map((p) => [p.id, p]));
+  // Outer panels first: peeling the skin is what exposes the rest.
+  const maxShell = level.panels.reduce((m, p) => Math.max(m, p.shell), 0);
   const coverMap = game.coverageMap();
 
   while (steps < maxSteps) {
@@ -79,27 +81,27 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
     if (reachPerStep && frontsPerStep && boxColorsPerStep) {
       reachPerStep.push(reachable.length);
       const fronts = new Set<number>();
-      for (const id of reachable) fronts.add(byId.get(id)!.plateId);
+      for (const id of reachable) fronts.add(byId.get(id)!.panelId);
       frontsPerStep.push(fronts.size);
       boxColorsPerStep.push(new Set(boxes.map((b) => b.color)).size);
     }
     const boxRoom = new Map<ScrewColor, number>();
     for (const b of boxes) if (b.screws.length < BOX_CAPACITY) boxRoom.set(b.color, Math.max(boxRoom.get(b.color) ?? -1, b.screws.length));
 
-    // 1. Matching screw → fullest box, preferring screws that bring a plate
+    // 1. Matching screw → fullest box, preferring screws that bring a panel
     //    closer to dropping (that is what keeps new screws arriving, and it is
-    //    what a human does: clear a plate out rather than pick at random).
+    //    what a human does: clear a panel out rather than pick at random).
     let pick = -1;
     let bestScore = -Infinity;
-    const plateStates = naive ? undefined : new Map(game.peekPlates().map((p) => [p.id, p]));
+    const panelStates = naive ? undefined : new Map(game.peekPanels().map((p) => [p.id, p]));
     for (const id of reachable) {
       const s = byId.get(id)!;
       const fill = boxRoom.get(s.color) ?? -1;
       if (fill < 0) continue;
       if (naive) { if (pick < 0 || rng.chance(0.5)) pick = id; continue; }
-      const left = plateStates!.get(s.plateId)!.remainingScrews.length;
+      const left = panelStates!.get(s.panelId)!.remainingScrews.length;
       let hiddenActive = 0;
-      for (const cid of coverMap.get(s.plateId) ?? []) {
+      for (const cid of coverMap.get(s.panelId) ?? []) {
         const c = byId.get(cid)!;
         if (c.location === 'plate' && boxRoom.has(c.color)) hiddenActive++;
       }
@@ -123,21 +125,21 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
         if (s.location === 'tray') trayCount.set(s.color, (trayCount.get(s.color) ?? 0) + 1);
         if (s.location === 'tray' || s.location === 'plate') remaining.set(s.color, (remaining.get(s.color) ?? 0) + 1);
       }
-      const plates = new Map(game.peekPlates().map((p) => [p.id, p]));
+      const panels = new Map(game.peekPanels().map((p) => [p.id, p]));
       let bestScore = -Infinity;
       for (const id of reachable) {
         const s = byId.get(id)!;
-        const plate = plates.get(s.plateId)!;
-        const left = plate.remainingScrews.length;
-        // Screws of an active colour that this plate is currently hiding.
+        const panel = panels.get(s.panelId)!;
+        const left = panel.remainingScrews.length;
+        // Screws of an active colour that this panel is currently hiding.
         let hiddenActive = 0;
-        for (const cid of coverMap.get(s.plateId) ?? []) {
+        for (const cid of coverMap.get(s.panelId) ?? []) {
           const c = byId.get(cid)!;
           if (c.location === 'plate' && boxRoom.has(c.color)) hiddenActive++;
         }
-        const layer = plateById.get(s.plateId)!.layer;
+        const shell = panelById.get(s.panelId)!.shell;
         let score = 3 / left + (hiddenActive * 2.5) / left + (trayCount.get(s.color) ?? 0) * 1.2;
-        score += (remaining.get(s.color) ?? 0) * 0.15 + layer * 0.2;
+        score += (remaining.get(s.color) ?? 0) * 0.15 + (maxShell - shell) * 0.2;
         score += rng.float(0, 2);
         if (score > bestScore) { bestScore = score; pick = id; }
       }

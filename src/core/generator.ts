@@ -1,22 +1,26 @@
 /**
  * Deterministic level generator. `generateLevel(n)` always returns the same
  * LevelDef for the same n: the seed is a hash of (n, attempt), and the level is
- * the BEST of 80-110 candidates rather than the first passable one (the ~2 s
- * budget of CONTRACT_V2 §7 buys quality, not just a pass). The box queue is
+ * the BEST of a few dozen candidates rather than the first passable one (the
+ * ~2 s budget of CONTRACT_V3 §7 buys quality, not just a pass). The box queue is
  * recorded from a bot play-through with a lazy colour provider.
  *
  * Every candidate must:
- *   1. have the right shape   — enough screws, >= 2 plates, not bottom-heavy (§4)
+ *   1. have the right shape   — enough screws, >= 2 panels, the right shells (§7)
  *   2. be winnable            — the planning bot wins with a lazily chosen queue
- * and is then ranked by the §5 non-linearity statistics measured over that
- * play-through plus how close it lands to the band's size/depth targets. The
+ * and is then ranked by the §7 non-linearity statistics measured over that
+ * play-through plus how close it lands to the band's size/shell targets. The
  * best candidate that also survives the "not too forgiving" naive-bot gate wins.
+ *
+ * Solvability is not left to luck: the assembly is built so that a screw can
+ * only ever be blocked by panels in a strictly outer shell (see ./assembly), so
+ * a legal move always exists. What the bot play-through actually proves is that
+ * the COLOUR and TRAY economy works out.
  */
-import { ALL_COLORS, BOX_CAPACITY, type LevelDef, type PlateDef, type ScrewColor, type ScrewDef } from './types';
+import { ALL_COLORS, BOX_CAPACITY, type LevelDef, type PanelDef, type ScrewColor, type ScrewDef } from './types';
 import { Rng, hashSeed } from './rng';
 import { difficultyFor, TOTAL_LEVELS, type DifficultyParams } from './difficulty';
-import { bottomLayerFraction, compactLayers, placePlates, placeScrews, trimToMultiple, type Layout } from './placement';
-import { plateContainsWorldPoint } from './geometry';
+import { buildAssembly, outerShellFraction, shellCount, trimScrews, type Assembly } from './assembly';
 import { Game } from './game';
 import { chooseLazyBoxColor } from './colorChoice';
 import { playBot, type BotResult } from './bot';
@@ -25,11 +29,11 @@ export { TOTAL_LEVELS };
 
 /**
  * Assign colours so that each colour count is a multiple of BOX_CAPACITY.
- * `clumping` in [0, 1] controls how much screws on the same plate share
- * colours: 0 = fully random, 1 = colour runs laid down plate by plate.
+ * `clumping` in [0, 1] controls how much screws on the same panel share
+ * colours: 0 = fully random, 1 = colour runs laid down panel by panel.
  */
-export function assignColors(layout: Layout, params: DifficultyParams, rng: Rng, clumping: number): ScrewColor[] {
-  const count = layout.screws.length;
+export function assignColors(asm: Assembly, params: DifficultyParams, rng: Rng, clumping: number): ScrewColor[] {
+  const count = asm.screws.length;
   const boxes = count / BOX_CAPACITY;
   const k = Math.max(1, Math.min(params.colors, boxes, ALL_COLORS.length));
   const palette = rng.shuffle([...ALL_COLORS]).slice(0, k);
@@ -38,9 +42,9 @@ export function assignColors(layout: Layout, params: DifficultyParams, rng: Rng,
   // Runs of the same colour, in random colour order.
   const runs: ScrewColor[] = [];
   for (const i of rng.shuffle(perColor.map((_, i) => i))) for (let j = 0; j < perColor[i] * BOX_CAPACITY; j++) runs.push(palette[i]);
-  // Screw order: grouped by plate (random plate order, random order inside).
-  const plateRank = new Map(rng.shuffle(layout.plates.map((p) => p.id)).map((id, i) => [id, i]));
-  const order = layout.screws.map((s, i) => ({ i, key: plateRank.get(s.plateId)! + rng.next() * 0.99 }))
+  // Screw order: grouped by panel (random panel order, random order inside).
+  const panelRank = new Map(rng.shuffle(asm.panels.map((p) => p.id)).map((id, i) => [id, i]));
+  const order = asm.screws.map((s, i) => ({ i, key: panelRank.get(s.panelId)! + rng.next() * 0.99 }))
     .sort((a, b) => a.key - b.key).map((o) => o.i);
   const colors: ScrewColor[] = new Array(count);
   order.forEach((si, j) => { colors[si] = runs[j]; });
@@ -53,23 +57,25 @@ export function assignColors(layout: Layout, params: DifficultyParams, rng: Rng,
   return colors;
 }
 
-function buildDef(level: number, seed: number, params: DifficultyParams, layout: Layout, colors: ScrewColor[], rng: Rng): LevelDef {
-  const plates: PlateDef[] = layout.plates.map((p, i) => ({ ...p, id: i }));
-  const idMap = new Map(layout.plates.map((p, i) => [p.id, i]));
-  const screws: ScrewDef[] = layout.screws.map((s, i) => ({
-    id: i, plateId: idMap.get(s.plateId)!, x: s.x, y: s.y, color: colors[i], hidden: false,
+function buildDef(level: number, seed: number, params: DifficultyParams, asm: Assembly, colors: ScrewColor[], rng: Rng): LevelDef {
+  const panels: PanelDef[] = asm.panels.map((p, i) => ({ ...p, id: i }));
+  const idMap = new Map(asm.panels.map((p, i) => [p.id, i]));
+  const screws: ScrewDef[] = asm.screws.map((s, i) => ({
+    id: i,
+    panelId: idMap.get(s.panelId)!,
+    position: { ...s.position },
+    axis: { ...s.axis },
+    color: colors[i],
+    hidden: false,
   }));
-  // Mystery screws: a fraction of the screws blocked at start.
+  // Mystery screws: a fraction of the screws whose path is obstructed at start.
   if (params.mysteryFraction > 0) {
-    const blocked = screws.filter((s) => {
-      const layer = plates[s.plateId].layer;
-      return plates.some((p) => p.layer > layer && plateContainsWorldPoint(p, s.x, s.y));
-    });
+    const blocked = screws.filter((_, i) => asm.blockers[i].length > 0);
     const n = Math.round(blocked.length * params.mysteryFraction);
     for (const s of rng.shuffle(blocked).slice(0, n)) s.hidden = true;
   }
   return {
-    level, seed, plates, screws, boxQueue: [], activeBoxCount: params.activeBoxCount, traySlots: params.traySlots,
+    level, seed, panels, screws, boxQueue: [], activeBoxCount: params.activeBoxCount, traySlots: params.traySlots,
     colors: [...new Set(colors)].sort((a, b) => ALL_COLORS.indexOf(a) - ALL_COLORS.indexOf(b)),
     difficulty: params.label,
   };
@@ -82,26 +88,26 @@ export function simulateWithLazyQueue(def: LevelDef, seed: number): BotResult & 
   return { ...res, queue: [...game.peekQueue()] };
 }
 
-/* ------------------------------------------------ non-linearity (§5) */
+/* ------------------------------------------------ non-linearity (§7) */
 
 export interface LevelStats {
   level: number;
   screws: number;
-  plates: number;
-  layers: number;
-  /** Fraction of screws sitting on the bottom layer (CONTRACT_V2 §4: <= 0.35). */
-  bottomLayerFraction: number;
-  /** Screws reachable at the very start of the level. */
+  panels: number;
+  shells: number;
+  /** Fraction of screws sitting on the outermost shell. */
+  outerShellFraction: number;
+  /** Screws removable at the very start of the level (from any angle). */
   startReachable: number;
-  /** Most screws simultaneously reachable during the play-through. */
+  /** Most screws simultaneously removable during the play-through. */
   peakReachable: number;
-  /** Mean reachable screws per step over the whole play-through (§5). */
+  /** Mean removable screws per step over the whole play-through (§7). */
   avgReachable: number;
-  /** Fewest reachable screws outside the final 5 moves. */
+  /** Fewest removable screws outside the final 5 moves. */
   minReachable: number;
-  /** Mean number of distinct plates holding a reachable screw (§5). */
+  /** Mean number of distinct PANELS holding a removable screw (§7). */
   avgFronts: number;
-  /** Longest stretch of consecutive steps with fewer than 3 reachable screws. */
+  /** Longest stretch of consecutive steps with fewer than 3 removable screws. */
   maxChokeRun: number;
   /** Distinct colours among the active boxes at the very start of the level. */
   startBoxColors: number;
@@ -116,13 +122,14 @@ export interface NonLinearityTargets {
   minReachable: number;
   avgFronts: number;
   maxChokeRun: number;
-  /** Distinct colours the starting boxes must show (§5: N boxes, N fronts). */
+  /** Distinct colours the starting boxes must show (§7: N boxes, N fronts). */
   startBoxColors: number;
 }
 
 /**
- * CONTRACT_V2 §5 thresholds. Full strength from level 50 on; below that they
- * ramp down, because a 12-screw tutorial cannot offer 8 reachable screws.
+ * CONTRACT_V3 §7 thresholds (carried over from v2 §5). Full strength from level
+ * 50 on; below that they ramp down, because a 12-screw tutorial cannot offer 8
+ * removable screws.
  */
 export function nonLinearityTargets(level: number): NonLinearityTargets {
   const params = difficultyFor(level);
@@ -152,13 +159,12 @@ function statsFrom(def: LevelDef, res: BotResult): LevelStats {
     run = r < 3 ? run + 1 : 0;
     if (run > maxRun) maxRun = run;
   }
-  const layers = new Set(def.plates.map((p) => p.layer));
   return {
     level: def.level,
     screws: def.screws.length,
-    plates: def.plates.length,
-    layers: layers.size,
-    bottomLayerFraction: bottomLayerFraction(def.plates, def.screws),
+    panels: def.panels.length,
+    shells: shellCount(def.panels),
+    outerShellFraction: outerShellFraction(def.panels, def.screws),
     startReachable: reach.length ? reach[0] : 0,
     peakReachable: reach.length ? Math.max(...reach) : 0,
     avgReachable: mean(reach),
@@ -173,7 +179,7 @@ function statsFrom(def: LevelDef, res: BotResult): LevelStats {
 
 /**
  * Replay a level's recorded queue with the same bot/seed used at generation
- * time and report its §5 statistics. Deterministic, and identical to what the
+ * time and report its §7 statistics. Deterministic, and identical to what the
  * generator measured.
  */
 export function measureLevel(def: LevelDef): LevelStats {
@@ -199,17 +205,16 @@ function meetsTargets(stats: LevelStats, targets: NonLinearityTargets): boolean 
 
 /* ------------------------------------------------------- difficulty gate */
 
-function naiveRuns(screws: number): number { return screws > 90 ? 4 : screws > 45 ? 6 : 8; }
+function naiveRuns(screws: number): number { return screws > 110 ? 4 : screws > 45 ? 6 : 8; }
 
 /**
  * Difficulty gate. The planning bot proves the level is winnable; a naive bot
  * (random matching, random tray choices) then replays the FIXED queue several
  * times and its win count tells how forgiving the level is. Later levels (and
  * 'hard'/'extreme' ones) must be less forgiving, early ones must not be brutal.
- * Levels with the full four boxes are hard enough by construction (a naive bot
- * clears a 150-screw level less than half the time), so they skip the gate.
- * The gate only ranks candidates — if none passes, the best is used anyway, so
- * generation always terminates.
+ * Levels with the full four boxes are hard enough by construction, so they skip
+ * the gate. The gate only ranks candidates — if none passes, the best is used
+ * anyway, so generation always terminates.
  */
 function naiveWinLimits(level: number, params: DifficultyParams): { max: number; min: number } {
   const runs = naiveRuns(params.screws);
@@ -245,30 +250,34 @@ export function lastGenerationStats(): GenerationStats | undefined {
 }
 
 /**
- * Quality of a candidate level: how far it clears the §5 bar, how close it is
- * to the band's target size/depth, and how sane its exposed-screw count is.
- * The generator keeps the best candidate it saw rather than the first passable
- * one — with a ~2 s budget that is a far better use of the time (CONTRACT_V2 §7).
+ * Quality of a candidate level: how far it clears the §7 bar, how close it is
+ * to the band's target size/shells, and how evenly the screws are spread
+ * through the assembly. The generator keeps the best candidate it saw rather
+ * than the first passable one — with a ~2 s budget that is a far better use of
+ * the time (CONTRACT_V3 §7).
  */
 function quality(stats: LevelStats, t: NonLinearityTargets, params: DifficultyParams): number {
   const ratio = (v: number, target: number) => (target <= 0 ? 1 : Math.min(1.25, v / target));
   let q = 0;
   q += 2.2 * ratio(stats.avgReachable, t.avgReachable);
   q += 1.6 * ratio(stats.avgFronts, t.avgFronts);
+  // Headroom above the minReachable floor is worth paying for: v2's late levels
+  // sat exactly on it, which felt like a forced line whenever the tray filled.
   q -= 2.5 * Math.max(0, t.minReachable - stats.minReachable);
+  q += 0.9 * Math.min(3, Math.max(0, stats.minReachable - t.minReachable));
   q -= 0.8 * Math.max(0, stats.maxChokeRun - t.maxChokeRun);
   q += 3.0 * Math.min(1, stats.screws / params.screws) + (stats.screws >= params.screws ? 1.2 : 0);
-  q += 1.2 * Math.min(1, stats.layers / params.layers);
-  q += 0.5 * Math.min(1, stats.plates / Math.max(2, params.plates));
-  q -= 3.0 * Math.max(0, stats.bottomLayerFraction - 0.35);
-  q -= 0.35 * Math.max(0, stats.peakReachable - 28);
+  q += 1.2 * Math.min(1, stats.shells / params.shells);
+  q += 0.8 * Math.min(1, stats.panels / Math.max(2, params.panels));
+  // A solid whose screws all sit on the skin is a flat board again.
+  q -= 3.0 * Math.max(0, stats.outerShellFraction - 0.45);
   q -= 2.0 * Math.max(0, t.startBoxColors - stats.startBoxColors);
   return q;
 }
 
-/** Attempts per level; each costs a layout plus one bot play-through. */
+/** Attempts per level; each costs an assembly plus one bot play-through. */
 function attemptBudget(params: DifficultyParams): number {
-  return params.screws >= 120 ? 80 : params.screws >= 60 ? 100 : 110;
+  return params.screws >= 140 ? 45 : params.screws >= 100 ? 60 : params.screws >= 60 ? 80 : 110;
 }
 
 const KEEP = 5;
@@ -283,8 +292,8 @@ export function generateLevel(level: number): LevelDef {
   const params = difficultyFor(level);
   const targets = nonLinearityTargets(level);
   const budget = attemptBudget(params);
-  // Tier 1: right size + depth AND every §5 criterion. Tier 2: right size and
-  // depth. Tier 3: anything winnable. The best candidate of the highest
+  // Tier 1: right size + shells AND every §7 criterion. Tier 2: right size and
+  // shells. Tier 3: anything winnable. The best candidate of the highest
   // non-empty tier wins, so a level never silently shrinks out of its band.
   const tier1: Candidate[] = [];
   const tier2: Candidate[] = [];
@@ -300,20 +309,16 @@ export function generateLevel(level: number): LevelDef {
     const rng = new Rng(seed);
     const target = params.screws;
 
-    const plates = placePlates(params, rng);
-    if (plates.length < 2) continue;
-    let layout = placeScrews(plates, target, rng);
-    layout = trimToMultiple(layout, BOX_CAPACITY, rng, target);
-    compactLayers(layout.plates);
-    const count = layout.screws.length;
-    if (count < 9 || count % BOX_CAPACITY !== 0 || count < target * 0.5) continue;
-    if (layout.plates.length < 2) continue;
-    // Depth check (§4): the bottom layer must not hold most of the level.
-    const layerCount = new Set(layout.plates.map((p) => p.layer)).size;
-    if (layerCount >= 4 && bottomLayerFraction(layout.plates, layout.screws) > 0.35) continue;
+    const built = buildAssembly(params, rng);
+    if (built.panels.length < 2) continue;
+    const want = Math.floor(Math.min(built.screws.length, target) / BOX_CAPACITY) * BOX_CAPACITY;
+    if (want < 9) continue;
+    const asm = trimScrews(built, want, rng);
+    const count = asm.screws.length;
+    if (count % BOX_CAPACITY !== 0 || count < target * 0.5) continue;
 
-    const colors = assignColors(layout, params, rng, params.colorClumping);
-    const def = buildDef(level, seed, params, layout, colors, rng);
+    const colors = assignColors(asm, params, rng, params.colorClumping);
+    const def = buildDef(level, seed, params, asm, colors, rng);
     const sim = simulateWithLazyQueue(def, seed);
     if (sim.outcome !== 'won') continue;
     if (sim.queue.length !== count / BOX_CAPACITY) continue;
@@ -321,10 +326,10 @@ export function generateLevel(level: number): LevelDef {
 
     const stats = statsFrom(final, sim);
     // Opening with two boxes of the same colour narrows the level to one front
-    // no matter how many plates are reachable — never ship that.
+    // no matter how many panels are reachable — never ship that.
     if (stats.startBoxColors < targets.startBoxColors) continue;
     const c: Candidate = { def: final, stats, score: quality(stats, targets, params), attempt };
-    const rightSize = count >= target * 0.92 && stats.layers >= params.layers - 1;
+    const rightSize = count >= target * 0.92 && stats.shells >= params.shells - 1;
     keep(rightSize ? (meetsTargets(stats, targets) ? tier1 : tier2) : tier3, c);
   }
 

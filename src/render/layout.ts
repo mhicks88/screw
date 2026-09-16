@@ -1,16 +1,19 @@
 /**
  * World-space layout constants shared by every render module.
- * Board is in the XY plane (x right, y up), layers stack along +z toward the camera.
  *
- * v2 depth budget (CONTRACT_V2.md §3): levels reach 15 layers, so the per-layer
- * step and the plate thickness shrink to thin overlapping sheets. A 15-layer
- * stack occupies `14 * 0.12 + 0.10 = 1.78` world units, which fits inside
- * VIEW_BOUNDS.zMax = 2.0 together with the screw heads standing on top of it.
+ * v3 (CONTRACT_V3.md §1): the board is no longer a flat stack. The assembly is
+ * a solid object centred on the origin inside a bounding sphere of radius
+ * ASSEMBLY_RADIUS, and it is the OBJECT that rotates — the camera, the lights,
+ * the box row at y = +5.3 and the tray row at y = -5.3 are all fixed in world
+ * space, which is why the v2 box/tray layout, framing and insets code carries
+ * over untouched.
  */
 
-export const LAYER_SPACING = 0.12;
-export const PLATE_THICKNESS = 0.10;
-export const PLATE_BEVEL = 0.022;
+/** CONTRACT_V3 §1: the assembly fits inside this radius so it stays framed from any angle. */
+export const ASSEMBLY_RADIUS = 3.0;
+
+/** Chamfer applied to every extruded panel (see panelMesh.ts). */
+export const PANEL_BEVEL = 0.018;
 
 export const BOX_Y = 5.3;
 export const TRAY_Y = -5.3;
@@ -32,49 +35,56 @@ export const TRAY_HOLE_R = 0.2;
 export const SCREW_HEAD_R = 0.23;
 export const SCREW_HIT_R = 0.41;
 
-/** Bounding region the camera must keep visible (contract §2, retuned in v2 §3). */
-export const VIEW_BOUNDS = { x: 3.7, y: 6.2, zMin: -0.4, zMax: 2.0 };
+/**
+ * Bounding region the camera must keep visible: the boxes/tray rows in y, and
+ * the whole bounding sphere of the assembly in x/z (the object can turn any
+ * way, so the z extent is now as wide as the x extent).
+ */
+export const VIEW_BOUNDS = {
+  x: 3.7,
+  y: 6.2,
+  zMin: -ASSEMBLY_RADIUS - 0.25,
+  zMax: ASSEMBLY_RADIUS + 0.25,
+};
+
+/* ------------------------------------------------------------------------ */
+/* Visibility (CONTRACT_V3 §6)                                               */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * A screw counts as front-facing when its ROTATED axis points at least this
+ * much toward the camera. cos 72° lets the player reach a screw well before its
+ * face turns fully to camera (so a quarter turn always brings in a new crop),
+ * while still hiding anything that would be seen edge-on or from behind.
+ *
+ * One single threshold, no hysteresis: the tappable set has to be exactly
+ * "removable ∩ front-facing" at any resting orientation, and a hysteresis band
+ * would make that set depend on how the object got there.
+ */
+export const FACING_MIN_DOT = 0.31;
 
 /* ------------------------------------------------------------------------ */
 /* Depth legibility                                                          */
 /* ------------------------------------------------------------------------ */
 
 /**
- * Aerial-perspective tint. Lower layers are lerped toward this colour so the
- * stack reads as depth even though consecutive plates are only 0.12 apart.
- * It matches the scene clear colour, so "deep" reads as "further into the
- * background" rather than "a different, muddier plastic".
+ * Aerial-perspective tint, matched to the scene clear colour. In v3 it is keyed
+ * to the panel's SHELL rather than a stack layer: inner shells sit deeper
+ * inside the object and are seen through the holes of the outer ones, so
+ * fading them keeps the outer silhouette readable.
  */
 export const DEPTH_TINT = 0x161c33;
 
-/** Strongest fog applied to the bottom-most layer of a deep stack. */
-export const PLATE_DEPTH_FOG = 0.62;
-/**
- * Screws are tinted far less: their colour is the core mechanic and a reachable
- * screw can legitimately sit on layer 0.
- */
-export const SCREW_DEPTH_FOG = 0.26;
+/** Strongest fog applied to the innermost shell of a deep assembly. */
+export const PANEL_DEPTH_FOG = 0.42;
+/** Screws are tinted far less: their colour is the core mechanic. */
+export const SCREW_DEPTH_FOG = 0.18;
 
-/**
- * Fog amount for a plate/screw on `layer` inside a stack topped by `maxLayer`.
- *
- * Keyed to the *absolute* number of layers below the top rather than a
- * normalised 0..1, so one layer down always looks one layer down whether the
- * level is 3 deep or 15 deep, and consecutive plates near the top — the ones
- * the player actually reads — differ by a visible step.
- */
-export function depthFogAmount(layer: number, maxLayer: number, strength: number): number {
-  const depth = Math.max(0, maxLayer - layer);
+/** Fog amount for a panel/screw on `shell`, 0 = outermost. */
+export function shellFogAmount(shell: number, strength: number): number {
+  const depth = Math.max(0, shell);
   if (depth === 0) return 0;
-  return strength * (1 - Math.exp(-0.4 * depth));
-}
-
-export function plateBottomZ(layer: number): number {
-  return layer * LAYER_SPACING;
-}
-
-export function plateTopZ(layer: number): number {
-  return layer * LAYER_SPACING + PLATE_THICKNESS;
+  return strength * (1 - Math.exp(-0.5 * depth));
 }
 
 /** Horizontal centres for `n` box positions, centred and fitting x ∈ [-3.2, 3.2]. */
@@ -85,9 +95,8 @@ export function boxPositionsX(n: number): number[] {
 }
 
 /**
- * Slot pitch for `n` tray slots. CONTRACT_V2 §6 expects deep levels to raise
- * BASE_TRAY_SLOTS, so the bar tightens its pitch once the default 0.72 would
- * push it outside VIEW_BOUNDS.x rather than running off the screen.
+ * Slot pitch for `n` tray slots. Deep levels raise BASE_TRAY_SLOTS, so the bar
+ * tightens its pitch once the default 0.72 would push it off screen.
  */
 export function traySlotSpacing(n: number): number {
   const count = Math.max(1, n);
@@ -107,13 +116,8 @@ export function trayWidth(n: number): number {
 }
 
 /**
- * Direction of the key light (see scene.ts). Contact shadows are offset along
- * its projection onto the board plane, so the fake shadows agree with the
- * shading on the plate sides.
+ * Direction of the key light (see scene.ts). Fixed in world space like the
+ * camera, so turning the object moves the highlight across it — which is most
+ * of what sells the assembly as a solid rather than a picture.
  */
 export const KEY_LIGHT = { x: 5.5, y: 7.6, z: 9.0 };
-
-/** Board-plane offset of a contact shadow cast from `height` above a surface. */
-export function contactShadowOffset(height: number): { x: number; y: number } {
-  return { x: (-KEY_LIGHT.x / KEY_LIGHT.z) * height, y: (-KEY_LIGHT.y / KEY_LIGHT.z) * height };
-}

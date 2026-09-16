@@ -6,7 +6,7 @@
  */
 
 export type SfxName =
-  | 'tap' | 'screwOut' | 'screwIn' | 'boxComplete' | 'boxSpawn' | 'plateDrop'
+  | 'tap' | 'screwOut' | 'screwIn' | 'boxComplete' | 'boxSpawn' | 'panelDrop'
   | 'blocked' | 'win' | 'lose' | 'powerup' | 'click';
 
 let ctx: AudioContext | null = null;
@@ -193,8 +193,8 @@ const FX: Record<SfxName, (c: AudioContext) => void> = {
     tone(c, { type: 'sine', freq: 200, freqTo: 480, dur: 0.3, vol: 0.06, attack: 0.05 });
   },
 
-  // Low thud with a bit of rattle.
-  plateDrop(c) {
+  // Low thud with a bit of rattle: a freed panel falling away.
+  panelDrop(c) {
     tone(c, { type: 'sine', freq: 120, freqTo: 45, dur: 0.35, vol: 0.4 });
     noise(c, { dur: 0.18, vol: 0.18, freq: 250, type: 'lowpass', q: 0.7 });
     noise(c, { start: 0.06, dur: 0.12, vol: 0.07, freq: 1500, q: 2 });

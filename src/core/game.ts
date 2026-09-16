@@ -22,9 +22,9 @@
 import {
   BOX_CAPACITY, MAX_ACTIVE_BOXES, MAX_BONUS_SLOTS,
   type ActionResult, type BoxState, type GameApi, type GameEvent, type GameSnapshot, type GameStatus,
-  type LevelDef, type PlateState, type PowerUpId, type ScrewColor, type ScrewState,
+  type LevelDef, type PanelState, type PowerUpId, type ScrewColor, type ScrewState,
 } from './types';
-import { plateContainsWorldPoint } from './geometry';
+import { computeBlockers } from './blocking';
 import { colorNeeds, rankByNeed } from './colorChoice';
 import { solveNextMoves } from './solver';
 
@@ -42,7 +42,7 @@ interface Screw extends ScrewState { hidden: boolean }
 function cloneLevel(level: LevelDef, queue: ScrewColor[]): LevelDef {
   return {
     ...level,
-    plates: level.plates.map((p) => ({
+    panels: level.panels.map((p) => ({
       ...p,
       shape: {
         kind: p.shape.kind,
@@ -62,10 +62,15 @@ export class Game implements GameApi {
   private st: GameStatus = 'playing';
   private screws: Screw[] = [];
   private screwIdx = new Map<number, number>();
-  private plates: PlateState[] = [];
-  private plateIdx = new Map<number, number>();
-  /** Per screw index: indices of plates on a higher layer covering it (static). */
-  private coverers: number[][] = [];
+  private panels: PanelState[] = [];
+  private panelIdx = new Map<number, number>();
+  /**
+   * Per screw index: the indices of the panels its withdrawal ray passes
+   * through (CONTRACT_V3 §3). Static — panels never move, they only drop — so
+   * the rays are cast once here and every later "is this blocked?" is a
+   * handful of dropped-flag lookups.
+   */
+  private blockers: number[][] = [];
   private boxes: BoxState[] = [];
   private nextBoxId = 0;
   private queue: ScrewColor[];
@@ -108,21 +113,16 @@ export class Game implements GameApi {
   /* ------------------------------------------------------------ setup */
 
   private buildStatic(level: LevelDef): void {
-    this.plates = level.plates.map((p) => ({ id: p.id, dropped: false, remainingScrews: [] }));
-    level.plates.forEach((p, i) => this.plateIdx.set(p.id, i));
+    this.panels = level.panels.map((p) => ({ id: p.id, dropped: false, remainingScrews: [] }));
+    level.panels.forEach((p, i) => this.panelIdx.set(p.id, i));
     this.screws = level.screws.map((s) => ({
-      id: s.id, color: s.color, plateId: s.plateId, location: 'plate', revealed: !s.hidden, blocked: false, hidden: s.hidden,
+      id: s.id, color: s.color, panelId: s.panelId, location: 'plate', revealed: !s.hidden, blocked: false, hidden: s.hidden,
     }));
     level.screws.forEach((s, i) => {
       this.screwIdx.set(s.id, i);
-      this.plates[this.plateIdx.get(s.plateId)!].remainingScrews.push(s.id);
-      const layer = level.plates[this.plateIdx.get(s.plateId)!].layer;
-      const cov: number[] = [];
-      level.plates.forEach((p, pi) => {
-        if (p.layer > layer && plateContainsWorldPoint(p, s.x, s.y)) cov.push(pi);
-      });
-      this.coverers.push(cov);
+      this.panels[this.panelIdx.get(s.panelId)!].remainingScrews.push(s.id);
     });
+    this.blockers = computeBlockers(level.panels, level.screws);
     for (const s of this.screws) {
       s.blocked = this.isBlockedIdx(this.screwIdx.get(s.id)!);
       if (!s.blocked) s.revealed = true;
@@ -133,9 +133,9 @@ export class Game implements GameApi {
     this.st = g.st;
     this.screws = g.screws.map((s) => ({ ...s }));
     this.screwIdx = g.screwIdx;
-    this.plates = g.plates.map((p) => ({ ...p, remainingScrews: [...p.remainingScrews] }));
-    this.plateIdx = g.plateIdx;
-    this.coverers = g.coverers;
+    this.panels = g.panels.map((p) => ({ ...p, remainingScrews: [...p.remainingScrews] }));
+    this.panelIdx = g.panelIdx;
+    this.blockers = g.blockers;
     this.boxes = g.boxes.map((b) => ({ ...b, screws: [...b.screws] }));
     this.nextBoxId = g.nextBoxId;
     this.queue = [...g.queue];
@@ -153,8 +153,8 @@ export class Game implements GameApi {
       const s = this.screws[this.screwIdx.get(ss.id)!];
       Object.assign(s, ss);
     }
-    for (const ps of snap.plates) {
-      const p = this.plates[this.plateIdx.get(ps.id)!];
+    for (const ps of snap.panels) {
+      const p = this.panels[this.panelIdx.get(ps.id)!];
       p.dropped = ps.dropped;
       p.remainingScrews = [...ps.remainingScrews];
     }
@@ -177,7 +177,7 @@ export class Game implements GameApi {
       level: cloneLevel(this.level, this.queue),
       status: this.st,
       screws: this.screws.map(({ hidden: _h, ...s }) => ({ ...s })),
-      plates: this.plates.map((p) => ({ ...p, remainingScrews: [...p.remainingScrews] })),
+      panels: this.panels.map((p) => ({ ...p, remainingScrews: [...p.remainingScrews] })),
       boxes: this.boxes.map((b) => ({ ...b, screws: [...b.screws] })),
       nextBoxIndex: this.nextQ,
       tray: [...this.tray],
@@ -210,15 +210,15 @@ export class Game implements GameApi {
   }
   peekBoxes(): readonly Readonly<BoxState>[] { return this.boxes; }
   peekTray(): readonly (number | null)[] { return this.tray; }
-  peekPlates(): readonly Readonly<PlateState>[] { return this.plates; }
+  peekPanels(): readonly Readonly<PanelState>[] { return this.panels; }
   /** Current (possibly modified) box queue. */
   peekQueue(): readonly ScrewColor[] { return this.queue; }
-  /** Static map plateId → ids of screws (on lower plates) that this plate covers. */
+  /** Static map panelId → ids of the screws this panel currently stands in the way of. */
   coverageMap(): Map<number, number[]> {
     const m = new Map<number, number[]>();
-    this.coverers.forEach((cov, i) => {
+    this.blockers.forEach((cov, i) => {
       for (const pi of cov) {
-        const pid = this.plates[pi].id;
+        const pid = this.panels[pi].id;
         if (!m.has(pid)) m.set(pid, []);
         m.get(pid)!.push(this.screws[i].id);
       }
@@ -226,8 +226,12 @@ export class Game implements GameApi {
     return m;
   }
 
+  /**
+   * CONTRACT_V3 §3: the screw's withdrawal ray is obstructed while any panel it
+   * passes through is still in place. O(blockers), which is 0-4 in practice.
+   */
   private isBlockedIdx(i: number): boolean {
-    for (const pi of this.coverers[i]) if (!this.plates[pi].dropped) return true;
+    for (const pi of this.blockers[i]) if (!this.panels[pi].dropped) return true;
     return false;
   }
 
@@ -370,7 +374,7 @@ export class Game implements GameApi {
     return this.tray.indexOf(null);
   }
 
-  /** Removes a screw from its plate (already validated as on-plate). */
+  /** Removes a screw from its panel (already validated as on-panel). */
   private removeScrew(s: Screw, loseOnFull: boolean): ActionResult {
     const events: GameEvent[] = [];
     const box = this.findBoxWithRoom(s.color);
@@ -388,8 +392,8 @@ export class Game implements GameApi {
       s.revealed = true;
       events.push({ type: 'screwRevealed', screwId: s.id, color: s.color });
     }
-    const plate = this.plates[this.plateIdx.get(s.plateId)!];
-    plate.remainingScrews.splice(plate.remainingScrews.indexOf(s.id), 1);
+    const panel = this.panels[this.panelIdx.get(s.panelId)!];
+    panel.remainingScrews.splice(panel.remainingScrews.indexOf(s.id), 1);
     if (box) {
       this.placeInBox(s, box, 'plate', events);
     } else {
@@ -399,7 +403,7 @@ export class Game implements GameApi {
       this.trayStamp[slot] = ++this.stamp;
       events.push({ type: 'screwToTray', screwId: s.id, traySlot: slot });
     }
-    if (plate.remainingScrews.length === 0 && !plate.dropped) this.dropPlate(plate, events);
+    if (panel.remainingScrews.length === 0 && !panel.dropped) this.dropPanel(panel, events);
     this.checkWin(events);
     return { ok: true, events };
   }
@@ -467,13 +471,13 @@ export class Game implements GameApi {
     }
   }
 
-  private dropPlate(plate: PlateState, events: GameEvent[]): void {
-    plate.dropped = true;
-    events.push({ type: 'plateDrop', plateId: plate.id });
-    const pi = this.plateIdx.get(plate.id)!;
+  private dropPanel(panel: PanelState, events: GameEvent[]): void {
+    panel.dropped = true;
+    events.push({ type: 'panelDrop', panelId: panel.id });
+    const pi = this.panelIdx.get(panel.id)!;
     const unblocked: Screw[] = [];
     this.screws.forEach((s, i) => {
-      if (s.location === 'plate' && this.coverers[i].includes(pi) && !this.isBlockedIdx(i)) unblocked.push(s);
+      if (s.location === 'plate' && this.blockers[i].includes(pi) && !this.isBlockedIdx(i)) unblocked.push(s);
     });
     if (unblocked.length === 0) return;
     events.push({ type: 'screwsUnblocked', screwIds: unblocked.map((s) => s.id) });

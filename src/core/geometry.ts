@@ -1,9 +1,13 @@
 /**
- * 2D geometry helpers for plates and screws. All functions are pure.
- * Plates are rigid transforms (rotation + translation) of a local polygon, so
- * distances measured in plate-local space equal distances in world space.
+ * 2D polygon geometry. All functions are pure.
+ *
+ * A panel is still a 2D outline (CONTRACT_V3 §2) — it is extruded along its
+ * local +Z and placed in assembly space by a RIGID transform, so distances and
+ * angles measured in panel-local coordinates are the same as in assembly space
+ * and every function here keeps working unchanged. ./geometry3 is the 3D half:
+ * it pulls points and rays into panel-local space and then calls in here.
  */
-import type { PlateDef, PlateShape, Vec2 } from './types';
+import type { PlateShape, Vec2 } from './types';
 
 export interface Aabb { minX: number; minY: number; maxX: number; maxY: number }
 
@@ -167,35 +171,5 @@ export function polygonDistance(a: readonly Vec2[], b: readonly Vec2[]): number 
       if (d < best) best = d;
     }
   }
-  return best;
-}
-
-/* ---------------------------------------------------------------- plates */
-
-/** Plate outline in world coordinates (CCW as in the shape). */
-export function plateWorldOutline(plate: PlateDef): Vec2[] {
-  return transformPolygon(plate.shape.outline, plate.x, plate.y, plate.rotation);
-}
-
-/** Plate holes in world coordinates. */
-export function plateWorldHoles(plate: PlateDef): Vec2[][] {
-  return (plate.shape.holes ?? []).map((h) => transformPolygon(h, plate.x, plate.y, plate.rotation));
-}
-
-export function plateWorldAabb(plate: PlateDef): Aabb {
-  return polygonAabb(plateWorldOutline(plate));
-}
-
-/** True when the world point lies on the plate body (inside outline, outside holes). */
-export function plateContainsWorldPoint(plate: PlateDef, x: number, y: number): boolean {
-  const local = inverseTransformPoint(x, y, plate.x, plate.y, plate.rotation);
-  return pointInShape(local, plate.shape);
-}
-
-/** Distance from a world point to the nearest plate edge (outline or hole). */
-export function plateEdgeDistance(plate: PlateDef, x: number, y: number): number {
-  const local = inverseTransformPoint(x, y, plate.x, plate.y, plate.rotation);
-  let best = distanceToPolygonEdge(local, plate.shape.outline);
-  for (const h of plate.shape.holes ?? []) best = Math.min(best, distanceToPolygonEdge(local, h));
   return best;
 }

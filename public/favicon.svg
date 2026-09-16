@@ -33,7 +33,7 @@
   <rect x="0" y="0" width="64" height="64" rx="14.08" ry="14.08" fill="url(#bg)"/>
   <!-- soft highlight in the corner -->
   <circle cx="14.08" cy="11.52" r="32" fill="url(#glow)"/>
-  <!-- little plate behind the screw -->
+  <!-- little panel behind the screw -->
   <rect x="2.6239999999999952" y="9.151999999999997" width="58.75200000000001" height="45.696000000000005" rx="7.616"
         fill="#2ec4d6" opacity="0.95" transform="rotate(-8 32 32)" filter="url(#shadow)"/>
   <rect x="2.6239999999999952" y="9.151999999999997" width="58.75200000000001" height="10.88" rx="5.44"

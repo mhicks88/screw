@@ -9,22 +9,46 @@
  *     The board itself is much too big to live in the hot record (a 150-screw
  *     level serialises to tens of KB), so it is stored under its own key and
  *     the record only carries what the menu needs to offer "Resume level N".
+ * v3: the flat stack of plates became a 3D assembly of panels (CONTRACT_V3 §2),
+ *     so `GameSnapshot` — and therefore every saved *board* — changed shape.
+ *     Adds `coach`, the first-run teaching flags (currently: has the player
+ *     ever rotated the model).
  *
- * v1 records are migrated in place on load (same key, `resume: null`), so an
- * existing save keeps its completed levels and settings.
+ * Migration rule: the record itself is migrated in place on load (same key), so
+ * completed levels, the current level and settings ALWAYS survive a version
+ * bump. The saved board never migrates — a v2 board restored into a v3 build
+ * would be a plate stack with no panels and would crash the renderer, so older
+ * boards are simply discarded (their key is deleted and `resume` is dropped).
  */
 import type { GameSnapshot } from '../core/types';
 
-export const PROGRESS_VERSION = 2 as const;
+export const PROGRESS_VERSION = 3 as const;
 
-/** Unchanged from v1 on purpose: v1 payloads are migrated in place. */
+/** Unchanged from v1 on purpose: older payloads are migrated in place. */
 const KEY = 'screwdom.progress.v1';
-/** The in-progress board. Separate key so a big write can never corrupt the record above. */
-const SAVE_KEY = 'screwdom.save.v2';
+/**
+ * The in-progress board. Separate key so a big write can never corrupt the
+ * record above, and *versioned* so a board written by an older schema can never
+ * be parsed by a newer build — the key simply is not there.
+ */
+const SAVE_KEY = 'screwdom.save.v3';
+/** Boards from superseded schemas. Deleted on load so they do not squat on quota. */
+const LEGACY_SAVE_KEYS = ['screwdom.save.v2'];
 
 export interface Settings {
   sound: boolean;
 }
+
+/** One-time teaching moments the player has already had. */
+export interface Coach {
+  /** True once the player has rotated the model (or waved the coach mark away). */
+  rotateDone: boolean;
+  /** How many times the "drag to turn" mark has been shown without a rotation. */
+  rotateShown: number;
+}
+
+/** After this many quiet appearances the coach mark stops asking. */
+export const ROTATE_COACH_MAX_SHOWS = 3;
 
 /** Everything the menu needs to advertise a saved game without parsing the board. */
 export interface ResumeInfo {
@@ -46,6 +70,8 @@ export interface Progress {
   settings: Settings;
   /** Descriptor of the saved in-progress board, or null. */
   resume: ResumeInfo | null;
+  /** First-run coach marks (v3). */
+  coach: Coach;
 }
 
 export interface SavedGame {
@@ -62,6 +88,7 @@ export function defaultProgress(): Progress {
     completed: [],
     settings: { sound: true },
     resume: null,
+    coach: { rotateDone: false, rotateShown: 0 },
   };
 }
 
@@ -85,7 +112,7 @@ function normalizeResume(raw: unknown): ResumeInfo | null {
 }
 
 /**
- * Coerce anything (including a v1 record) into a well-formed v2 Progress.
+ * Coerce anything (including a v1 or v2 record) into a well-formed v3 Progress.
  * Never throws; unknown fields are dropped, missing fields get defaults.
  */
 export function normalizeProgress(raw: unknown): Progress {
@@ -107,7 +134,16 @@ export function normalizeProgress(raw: unknown): Progress {
     if (typeof so.sound === 'boolean') base.settings.sound = so.sound;
   }
 
-  // v1 has no `resume`; anything older or malformed simply starts without one.
+  const c = o.coach;
+  if (c && typeof c === 'object') {
+    const co = c as Record<string, unknown>;
+    if (typeof co.rotateDone === 'boolean') base.coach.rotateDone = co.rotateDone;
+    if (isFiniteInt(co.rotateShown) && co.rotateShown >= 0) base.coach.rotateShown = co.rotateShown;
+  }
+
+  // Only a current-version record can point at a board this build can restore.
+  // v1 has no `resume` at all; a v2 `resume` describes a plate-stack board that
+  // v3 cannot load, so it is dropped with the board it refers to.
   if (o.version === PROGRESS_VERSION) base.resume = normalizeResume(o.resume);
 
   return base;
@@ -139,6 +175,8 @@ function remove(key: string): void {
 }
 
 export function loadProgress(): Progress {
+  // Boards written by a superseded schema are unreadable here; reclaim the space.
+  for (const k of LEGACY_SAVE_KEYS) if (read(k) !== null) remove(k);
   const text = read(KEY);
   if (!text) return defaultProgress();
   let p: Progress;
@@ -181,11 +219,11 @@ function looksLikeSnapshot(v: unknown): v is GameSnapshot {
     !!level &&
     typeof level === 'object' &&
     Array.isArray(level.screws) &&
-    Array.isArray(level.plates) &&
+    Array.isArray(level.panels) &&
     Array.isArray(level.boxQueue) &&
     isFiniteInt(level.level) &&
     Array.isArray(o.screws) &&
-    Array.isArray(o.plates) &&
+    Array.isArray(o.panels) &&
     Array.isArray(o.boxes) &&
     Array.isArray(o.tray) &&
     isFiniteInt(o.totalScrews) &&
@@ -260,6 +298,26 @@ export function setCurrentLevel(p: Progress, level: number): Progress {
   p.currentLevel = Math.max(1, Math.floor(level));
   saveProgress(p);
   return p;
+}
+
+/** Remember that the player has been taught (or has worked out) the drag gesture. */
+export function markRotateLearned(p: Progress): Progress {
+  if (p.coach.rotateDone) return p;
+  p.coach.rotateDone = true;
+  saveProgress(p);
+  return p;
+}
+
+/** Count one quiet appearance of the "drag to turn" coach mark. */
+export function noteRotateCoachShown(p: Progress): Progress {
+  p.coach.rotateShown = Math.min(ROTATE_COACH_MAX_SHOWS, p.coach.rotateShown + 1);
+  saveProgress(p);
+  return p;
+}
+
+/** Should the game screen still offer the one-time "drag to turn" coach mark? */
+export function shouldShowRotateCoach(p: Progress): boolean {
+  return !p.coach.rotateDone && p.coach.rotateShown < ROTATE_COACH_MAX_SHOWS;
 }
 
 /** First level that has not been completed yet (1 if none). */

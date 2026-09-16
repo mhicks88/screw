@@ -4,7 +4,7 @@ import type { TweenManager } from './tween';
 import type { Effects } from './effects';
 import type { ScrewVisual } from './screwMesh';
 import type { ScrewField } from './screwField';
-import type { PlateVisual } from './plateMesh';
+import type { PanelVisual } from './panelMesh';
 import type { BoxVisual } from './boxMesh';
 import { boxSlotLocal } from './boxMesh';
 import type { TrayVisual } from './trayMesh';
@@ -15,22 +15,20 @@ export interface World {
   rig: SceneRig;
   tweens: TweenManager;
   effects: Effects;
-  /** Batched instanced renderer for the screws resting on plates. */
+  /** Batched instanced renderer for the screws seated on the assembly. */
   field: ScrewField;
   screws: Map<number, ScrewVisual>;
-  plates: Map<number, PlateVisual>;
+  panels: Map<number, PanelVisual>;
   boxes: Map<number, BoxVisual>;
   tray: TrayVisual | null;
   /** Logical tray occupancy (screw id or null per slot), kept in sync with events. */
   traySlots: (number | null)[];
   /** Number of horizontal box positions currently laid out. */
   boxPositionCount: number;
-  /** Highest plate layer in the current level (drives the depth tint ramp). */
-  maxLayer: number;
   /** Bumped on every loadLevel/dispose so in-flight async animations bail out. */
   generation: number;
-  /** Recompute which screws are covered; call after any plate leaves the board. */
-  recomputeCover: () => void;
+  /** Something about the assembly changed (panel gone, screw unblocked). */
+  invalidate: () => void;
 }
 
 export function isAlive(w: World, gen: number): boolean {

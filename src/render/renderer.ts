@@ -1,33 +1,50 @@
 import * as THREE from 'three';
-import type { GameEvent, GameSnapshot, PlateDef, ScrewDef } from '../core/types';
-import { plateContainsWorldPoint, plateEdgeDistance } from '../core/geometry';
+import type { GameEvent, GameSnapshot, ScrewDef } from '../core/types';
 import { SceneRig } from './scene';
 import { TweenManager } from './tween';
 import { Effects } from './effects';
 import { InputHandler } from './input';
 import { EventPlayer } from './events';
+import { Orbit } from './orbit';
+import { RotateAffordance } from './affordance';
 import type { World } from './world';
 import { boxSlotWorld, trayTargetWorld } from './world';
-import { createPlateVisual, disposePlateVisual, plateColorFor } from './plateMesh';
+import { createPanelVisual, disposePanelCaches, disposePanelVisual } from './panelMesh';
 import { ScrewField } from './screwField';
-import type { ScrewVisual } from './screwMesh';
 import { createScrewVisual, disposeScrewCaches, disposeScrewVisual } from './screwMesh';
+import { detachScrew } from './animations';
 import { createBoxVisual, disposeBoxCaches, disposeBoxVisual } from './boxMesh';
 import { createTrayVisual, disposeTrayCaches, disposeTrayVisual } from './trayMesh';
-import { SCREW_HEAD_R, boxPositionsX, plateTopZ } from './layout';
+import { boxPositionsX } from './layout';
+import type { PanelRayTarget } from './occlusion';
+import { blockDepth, buildRayTargets } from './occlusion';
 
 export interface RendererOptions {
   onScrewTap: (screwId: number) => void;
 }
 
 /**
+ * Starting orientation: a three-quarter view, so the object reads as a solid
+ * the moment the level loads instead of as a flat facade. It is only a seed —
+ * everything after this is quaternion accumulation from the drag (orbit.ts).
+ */
+const START_ORIENTATION = new THREE.Quaternion().setFromEuler(
+  new THREE.Euler(THREE.MathUtils.degToRad(13), THREE.MathUtils.degToRad(-27), 0, 'YXZ'),
+);
+
+/**
  * three.js view of the game. Sees only snapshots (loadLevel) and events
  * (playEvents); never touches the Game itself.
  *
- * v2 scale: up to 150 screws across ~40 thin plates on 15 layers. Screws that a
- * higher plate covers are not drawn (their heads would poke through the 0.02
- * unit air gap) and are not raycast; everything still seated on a plate is
- * drawn from one InstancedMesh.
+ * v3 (CONTRACT_V3): the board is a solid assembly of extruded panels inside a
+ * bounding sphere of radius 3, and THE OBJECT ROTATES, NOT THE CAMERA. All of
+ * it hangs off `rig.assemblyRoot`, whose quaternion the drag gesture drives;
+ * the camera, the lights, the box row and the tray row never move, which is why
+ * the v2 framing, insets and box/tray layout still hold.
+ *
+ * Screws carry a 3D position and an axis; only those the core reports removable
+ * AND whose rotated axis points at the camera are drawn solid and hit-tested
+ * (§6). Everything else is a rotation away.
  */
 export class GameRenderer {
   private readonly container: HTMLElement;
@@ -40,6 +57,8 @@ export class GameRenderer {
   private readonly world: World;
   private readonly player: EventPlayer;
   private readonly input: InputHandler;
+  private readonly orbit: Orbit;
+  private readonly affordance: RotateAffordance;
   private lastFrameMs = 0;
   private readonly resizeObserver: ResizeObserver | null = null;
   private readonly onWindowResize = () => this.resize();
@@ -47,12 +66,18 @@ export class GameRenderer {
   private active = true;
   private disposed = false;
   private targeting = false;
+  /** A hint is showing: the rotate markers come up with it, since the screw
+   * the solver picked may well be round the back. */
+  private hinting = false;
   private pressedId: number | null = null;
   private timeMs = 0;
-  private plateDefs: PlateDef[] = [];
-  /** Layer the depth tint is currently anchored to (tweened, so it can be fractional). */
-  private displayMaxLayer = 0;
-  private tintTween: { cancel(complete?: boolean): void } | null = null;
+  /** Camera position expressed in assembly space (drives the facing test). */
+  private readonly cameraLocal = new THREE.Vector3();
+  private readonly invQuat = new THREE.Quaternion();
+  private facingDirty = true;
+  /** Ray targets for the drill x-ray depth (occlusion.ts). */
+  private rayTargets: PanelRayTarget[] = [];
+  private coverDirty = true;
   /** Debug: animation speed multiplier (0 pauses animations). Not part of the contract. */
   timeScale = 1;
 
@@ -60,22 +85,31 @@ export class GameRenderer {
     this.container = container;
     this.options = options;
     this.rig = new SceneRig(container);
-    this.effects = new Effects(this.rig.scene);
-    this.field = new ScrewField(this.rig.boardRoot);
+    this.effects = new Effects(this.rig.fixedRoot);
+    this.field = new ScrewField(this.rig.assemblyRoot);
+    this.orbit = new Orbit(this.rig.camera);
+    this.orbit.reset(START_ORIENTATION);
+    this.rig.assemblyRoot.quaternion.copy(this.orbit.quaternion);
+    // Parented to the scene, not to either root: it is a HUD-ish overlay that
+    // must survive loadLevel clearing the roots.
+    this.affordance = new RotateAffordance(this.rig.scene, this.rig.camera);
     this.world = {
       rig: this.rig,
       tweens: this.tweens,
       effects: this.effects,
       field: this.field,
       screws: new Map(),
-      plates: new Map(),
+      panels: new Map(),
       boxes: new Map(),
       tray: null,
       traySlots: [],
       boxPositionCount: 0,
-      maxLayer: 0,
       generation: 0,
-      recomputeCover: () => this.recomputeCover(),
+      invalidate: () => {
+        this.field.markDirty();
+        this.facingDirty = true;
+        this.coverDirty = true;
+      },
     };
     this.player = new EventPlayer(this.world);
     this.input = new InputHandler({
@@ -84,6 +118,9 @@ export class GameRenderer {
       hitTargets: () => this.field.hitTargets(),
       onTap: (id) => this.options.onScrewTap(id),
       onPress: (id) => this.setPressed(id),
+      onDragStart: () => this.orbit.begin(),
+      onDrag: (dx, dy, dt) => this.orbit.drag(dx, dy, dt),
+      onDragEnd: () => this.orbit.end(),
     });
 
     if (typeof ResizeObserver !== 'undefined') {
@@ -102,25 +139,18 @@ export class GameRenderer {
     this.clearLevel();
     const level = snapshot.level;
 
-    const plateLayer = new Map<number, number>();
-    let maxLayer = 0;
-    for (const p of level.plates) {
-      plateLayer.set(p.id, p.layer);
-      if (p.layer > maxLayer) maxLayer = p.layer;
-    }
-    w.maxLayer = maxLayer;
-    this.displayMaxLayer = maxLayer;
-    this.plateDefs = level.plates;
+    const shellOf = new Map<number, number>();
+    for (const p of level.panels) shellOf.set(p.id, p.shell);
 
-    const droppedPlates = new Set(snapshot.plates.filter((p) => p.dropped).map((p) => p.id));
-    for (const p of level.plates) {
-      if (droppedPlates.has(p.id)) continue;
-      const pv = createPlateVisual(p, maxLayer);
-      w.plates.set(pv.id, pv);
-      w.rig.boardRoot.add(pv.mesh);
+    const droppedPanels = new Set(snapshot.panels.filter((p) => p.dropped).map((p) => p.id));
+    for (const p of level.panels) {
+      if (droppedPanels.has(p.id)) continue;
+      const pv = createPanelVisual(p);
+      w.panels.set(pv.id, pv);
+      w.rig.assemblyRoot.add(pv.mesh);
     }
 
-    // Boxes and their positions.
+    // Boxes and their positions (fixed world space, unchanged from v2).
     let positions = level.activeBoxCount;
     for (const b of snapshot.boxes) positions = Math.max(positions, b.position + 1);
     w.boxPositionCount = Math.max(1, positions);
@@ -129,59 +159,65 @@ export class GameRenderer {
       if (b.completed) continue;
       const bv = createBoxVisual(b, xs[Math.min(b.position, xs.length - 1)] ?? 0);
       w.boxes.set(bv.id, bv);
-      w.rig.boardRoot.add(bv.group);
+      w.rig.fixedRoot.add(bv.group);
     }
 
     // Tray.
     w.traySlots = [...snapshot.tray];
     w.tray = createTrayVisual(Math.max(1, snapshot.tray.length));
-    w.rig.boardRoot.add(w.tray.group);
+    w.rig.fixedRoot.add(w.tray.group);
 
     // Screws.
     const defs = new Map<number, ScrewDef>();
     for (const d of level.screws) defs.set(d.id, d);
-    const blocked = new Map<number, boolean>();
     for (const st of snapshot.screws) {
       const def = defs.get(st.id);
       if (!def || st.location === 'gone') continue;
-      const layer = plateLayer.get(st.plateId) ?? 0;
       const sv = createScrewVisual({
         id: st.id,
-        plateId: st.plateId,
+        panelId: st.panelId,
         color: st.color,
         revealed: st.revealed || !def.hidden,
         location: st.location,
-        layer,
-        x: def.x,
-        y: def.y,
-        z: plateTopZ(layer),
+        shell: shellOf.get(st.panelId) ?? 0,
+        position: def.position,
+        axis: def.axis,
       });
-      blocked.set(sv.id, st.blocked && st.location === 'plate');
+      sv.blocked = st.blocked && st.location === 'plate';
       w.screws.set(sv.id, sv);
     }
 
-    this.field.build(w.screws.values(), maxLayer);
+    this.field.build(w.screws.values());
 
-    // Park the screws that are not on a plate; they always own real meshes.
+    // Park the screws that are not on a panel; they always own real meshes and
+    // live in world space.
     for (const st of snapshot.screws) {
       const sv = w.screws.get(st.id);
       if (!sv) continue;
+      let target: THREE.Vector3 | null = null;
       if (st.location === 'tray') {
         const slot = st.traySlot ?? Math.max(0, w.traySlots.indexOf(st.id));
-        sv.pos.copy(trayTargetWorld(w, slot));
+        target = trayTargetWorld(w, slot);
       } else if (st.location === 'box') {
         const bv = st.boxId !== undefined ? w.boxes.get(st.boxId) : undefined;
         if (!bv) continue;
         const slot = st.boxSlot ?? Math.max(0, bv.screws.indexOf(st.id));
-        sv.pos.copy(boxSlotWorld(bv, slot));
-      } else {
-        continue;
+        target = boxSlotWorld(bv, slot);
       }
-      this.field.detach(sv);
+      if (!target) continue;
+      const g = detachScrew(this.world, sv);
+      sv.pos.copy(target);
+      sv.worldQuat.identity();
+      g.position.copy(target);
+      g.quaternion.identity();
     }
 
-    this.recomputeCover(blocked);
+    this.rayTargets = buildRayTargets(level.panels);
+    this.coverDirty = true;
+    this.affordance.clear();
     this.field.setTargeting(this.targeting);
+    this.facingDirty = true;
+    this.updateFacing();
   }
 
   /** Animate events. Safe to call while earlier events are still animating; resolves when these finish. */
@@ -192,24 +228,29 @@ export class GameRenderer {
 
   /** Highlight these screws (pulsing glow) until cleared. Empty array clears. */
   setHint(screwIds: number[]): void {
+    this.hinting = screwIds.length > 0;
     this.field.setHint(screwIds);
   }
 
-  /** Toggle "drill targeting" mode: on-plate screws show a crosshair/outline. */
+  /** Toggle "drill targeting" mode: front-facing screws (even blocked) show a ring. */
   setTargetingMode(on: boolean): void {
     this.targeting = on;
     this.field.setTargeting(on);
+    if (on) this.updateGhostDepth();
   }
 
-  /** Pixels reserved by HTML overlays; the camera frames the board between them. */
+  /** Pixels reserved by HTML overlays; the camera frames the assembly between them. */
   setInsets(topPx: number, bottomPx: number): void {
     this.rig.setInsets(topPx, bottomPx);
+    this.orbit.setRadiusPx(this.rig.assemblyPixelRadius());
+    this.facingDirty = true;
   }
 
   /** Pause/resume rendering (menus). Animations keep advancing so promises resolve. */
   setActive(active: boolean): void {
     this.active = active;
     this.input.enabled = active;
+    if (!active) this.orbit.cancel();
     if (active && !this.raf && !this.disposed) this.loop();
   }
 
@@ -218,6 +259,8 @@ export class GameRenderer {
     const w = this.container.clientWidth || window.innerWidth;
     const h = this.container.clientHeight || window.innerHeight;
     this.rig.resize(w, h);
+    this.orbit.setRadiusPx(this.rig.assemblyPixelRadius());
+    this.facingDirty = true;
   }
 
   dispose(): void {
@@ -230,9 +273,11 @@ export class GameRenderer {
     window.removeEventListener('orientationchange', this.onWindowResize);
     this.input.dispose();
     this.clearLevel();
+    this.affordance.dispose();
     this.field.dispose();
     this.effects.dispose();
     disposeScrewCaches();
+    disposePanelCaches();
     disposeBoxCaches();
     disposeTrayCaches();
     this.rig.dispose();
@@ -247,127 +292,61 @@ export class GameRenderer {
     this.effects.clear();
     this.player.reset();
     for (const s of w.screws.values()) disposeScrewVisual(s);
-    for (const p of w.plates.values()) disposePlateVisual(p);
+    for (const p of w.panels.values()) disposePanelVisual(p);
     for (const b of w.boxes.values()) disposeBoxVisual(b);
     if (w.tray) disposeTrayVisual(w.tray);
     this.field.clear();
+    this.affordance.clear();
     w.screws.clear();
-    w.plates.clear();
+    w.panels.clear();
     w.boxes.clear();
     w.tray = null;
     w.traySlots = [];
     w.boxPositionCount = 0;
-    w.maxLayer = 0;
-    w.rig.boardRoot.clear();
-    this.plateDefs = [];
-    this.displayMaxLayer = 0;
-    this.tintTween?.cancel();
-    this.tintTween = null;
+    w.rig.assemblyRoot.clear();
+    w.rig.fixedRoot.clear();
     this.pressedId = null;
+    this.hinting = false;
+    this.rayTargets = [];
+    this.coverDirty = true;
   }
 
   /**
-   * How many live plates on a higher layer cover each on-plate screw.
-   *
-   * 0 → drawn and tappable. 1 → hidden, but drillable as an x-ray ghost in
-   * targeting mode (it is the next thing the player will uncover). 2+ → not
-   * drawn at all. Only the 0/1/2+ distinction matters, so the scan stops at 2;
-   * it runs on load and after each plate actually leaves the board.
-   *
-   * `override` (from a snapshot's `blocked` flags) wins where it disagrees,
-   * because the core is authoritative about reachability.
+   * Which of the blocked screws are exactly one panel deep, and so worth
+   * showing as an x-ray ghost while the drill is armed. Only runs in targeting
+   * mode, and only when the live panel set changed.
    */
-  private recomputeCover(override?: Map<number, boolean>): void {
-    const w = this.world;
-    const live: PlateDef[] = [];
-    for (const p of this.plateDefs) {
-      const pv = w.plates.get(p.id);
-      if (pv && !pv.dropped) live.push(p);
-    }
-    for (const s of w.screws.values()) {
-      if (s.location !== 'plate') continue;
-      let c = 0;
-      for (const p of live) {
-        if (p.layer <= s.layer) continue;
-        if (plateContainsWorldPoint(p, s.home.x, s.home.y)) {
-          c++;
-          if (c >= 2) break;
-        }
+  private updateGhostDepth(): void {
+    if (!this.coverDirty) return;
+    this.coverDirty = false;
+    const live = (id: number): boolean => {
+      const pv = this.world.panels.get(id);
+      return !!pv && !pv.dropped;
+    };
+    for (const s of this.world.screws.values()) {
+      if (s.location !== 'plate' || !s.blocked) {
+        s.ghost = false;
+        continue;
       }
-      const forced = override?.get(s.id);
-      if (forced === false) c = 0;
-      else if (forced === true && c === 0) c = 1;
-      s.coverCount = c;
-      if (c === 0) this.seatScrew(s, live);
+      s.ghost = blockDepth(this.rayTargets, live, s.home, s.axis, s.panelId) < 2;
     }
     this.field.markDirty();
-    this.retargetDepthTint(live);
   }
 
   /**
-   * Lift a reachable screw clear of any higher plate whose *edge* cuts through
-   * its head.
+   * Which screws face the camera, for the current rotation (CONTRACT_V3 §6).
    *
-   * The screw's centre is what decides reachability, so a screw can be legally
-   * tappable while a plate one or more layers up covers most of its head. With
-   * only 0.02 units of air per layer that head would be all but swallowed — the
-   * player sees a bare plate where the game says a screw is. Seating it on top
-   * of the highest plate that clips it costs a few pixels of apparent height and
-   * keeps every tappable screw visible.
+   * The test runs in ASSEMBLY space — the camera is transformed into it once
+   * per rotated frame, and each screw then compares its own (unrotated) axis
+   * against the direction to that point. That is one inverse rotation plus a
+   * dot product per screw, instead of rotating 190 axes.
    */
-  private seatScrew(s: ScrewVisual, live: PlateDef[]): void {
-    let z = plateTopZ(s.layer);
-    for (const p of live) {
-      if (p.layer <= s.layer) continue;
-      if (plateEdgeDistance(p, s.home.x, s.home.y) < SCREW_HEAD_R + 0.02) {
-        z = Math.max(z, plateTopZ(p.layer) + 0.006);
-      }
-    }
-    if (Math.abs(z - s.home.z) < 1e-6) return;
-    const wasAtHome = Math.abs(s.pos.z - s.home.z) < 1e-6;
-    s.home.z = z;
-    if (wasAtHome && !s.group) {
-      s.pos.z = z;
-      this.field.setPose(s);
-    }
-  }
-
-  /**
-   * Keep the depth ramp anchored to the *highest surviving* layer.
-   *
-   * Without this the whole board keeps fading as the player peels it: a level
-   * whose tallest tower reached layer 14 would still tint its remaining layer-5
-   * top plate as if nine layers sat above it. The anchor follows the live top
-   * over ~400 ms so it reads as the stack settling, not as a colour pop.
-   */
-  private retargetDepthTint(live: PlateDef[]): void {
-    let top = 0;
-    for (const p of live) if (p.layer > top) top = p.layer;
-    if (live.length === 0 || Math.abs(top - this.displayMaxLayer) < 0.01) return;
-    this.world.maxLayer = top;
-    const from = this.displayMaxLayer;
-    this.tintTween?.cancel();
-    this.tintTween = this.tweens.add({
-      duration: 400,
-      onUpdate: (e) => {
-        this.displayMaxLayer = from + (top - from) * e;
-        this.applyDepthTint();
-      },
-      onComplete: () => {
-        this.displayMaxLayer = top;
-        this.applyDepthTint();
-        this.tintTween = null;
-      },
-    });
-  }
-
-  private applyDepthTint(): void {
-    const m = this.displayMaxLayer;
-    for (const def of this.plateDefs) {
-      const pv = this.world.plates.get(def.id);
-      if (pv && !pv.dropped) pv.mesh.material.color.copy(plateColorFor(def, m));
-    }
-    this.field.setMaxLayer(m);
+  private updateFacing(): void {
+    const cam = this.rig.camera;
+    this.invQuat.copy(this.rig.assemblyRoot.quaternion).invert();
+    this.cameraLocal.copy(cam.position).applyQuaternion(this.invQuat);
+    this.field.updateFacing(this.cameraLocal);
+    this.facingDirty = false;
   }
 
   private setPressed(id: number | null): void {
@@ -400,8 +379,24 @@ export class GameRenderer {
     this.timeMs += dt;
     this.tweens.update(dt);
     this.effects.update(dt);
+
+    // The object turns; the camera does not.
+    if (this.orbit.update(dt) || this.facingDirty) {
+      this.rig.assemblyRoot.quaternion.copy(this.orbit.quaternion);
+      this.updateFacing();
+    }
+
+    if (this.targeting) this.updateGhostDepth();
     this.field.flush();
     this.field.updateHint(this.timeMs);
+    this.affordance.update(
+      this.field.offscreenRemovable(),
+      this.rig.assemblyRoot.quaternion,
+      this.field.seatedCount(),
+      this.hinting,
+      dt || 16,
+      this.timeMs,
+    );
     if (this.active) this.rig.render();
   };
 }

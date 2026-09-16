@@ -52,7 +52,7 @@ export function showWinModal(o: WinModalOptions): void {
       h('div', { class: 'stars' }, svg(ICONS.star), svg(ICONS.star), svg(ICONS.star)),
       h('div', { class: 'emblem win' }, svg(ICONS.trophy)),
       h('h2', { class: 'win' }, 'Level complete!'),
-      h('p', null, `Level ${o.level} cleared. Nice work!`),
+      h('p', null, `Level ${o.level} stripped to the frame. Nice work!`),
       h(
         'div',
         { class: 'stats' },

@@ -1,7 +1,7 @@
 /**
  * Bounded lookahead used by the 'hint' power-up. Beam search over reachable
  * screws using the real Game rules (cloned games), scoring progress: screws
- * boxed, plates dropped, tray pressure and fresh matching opportunities.
+ * boxed, panels dropped, tray pressure and fresh matching opportunities.
  */
 import { BOX_CAPACITY, type GameSnapshot } from './types';
 import { Game } from './game';
@@ -28,7 +28,7 @@ function evaluate(g: Game): number {
       if (boxes.some((b) => b.color === s.color && b.screws.length < BOX_CAPACITY)) matching++;
     }
   }
-  for (const p of g.peekPlates()) if (p.dropped) score += 15;
+  for (const p of g.peekPanels()) if (p.dropped) score += 15;
   score -= trayCount * 8;
   score += reachable * 1.5 + matching * 3;
   return score;
@@ -39,12 +39,12 @@ function candidates(g: Game): number[] {
   const ids = g.reachableScrewIds();
   if (ids.length <= MAX_BRANCH) return ids;
   const boxes = g.peekBoxes();
-  const plates = new Map(g.peekPlates().map((p) => [p.id, p]));
+  const panels = new Map(g.peekPanels().map((p) => [p.id, p]));
   const screws = new Map(g.peekScrews().map((s) => [s.id, s]));
   const pre = (id: number) => {
     const s = screws.get(id)!;
     let v = boxes.some((b) => b.color === s.color && b.screws.length < BOX_CAPACITY) ? 10 : 0;
-    v -= plates.get(s.plateId)!.remainingScrews.length * 0.5;
+    v -= panels.get(s.panelId)!.remainingScrews.length * 0.5;
     return v;
   };
   return [...ids].sort((a, b) => pre(b) - pre(a)).slice(0, MAX_BRANCH);
@@ -55,7 +55,7 @@ interface Node { game: Game; seq: number[]; score: number }
 /**
  * Returns up to `maxMoves` screw ids to remove next. Only screws reachable in
  * the given snapshot are returned (never blocked ones); the sequence stops at
- * the first move that only becomes reachable after a plate drop.
+ * the first move that only becomes reachable after a panel drop.
  */
 export function solveNextMoves(snapshot: GameSnapshot, maxMoves = 3): number[] {
   if (snapshot.status !== 'playing') return [];

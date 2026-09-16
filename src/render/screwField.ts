@@ -13,28 +13,32 @@ import {
   seatedScrewMaterial,
   targetRingMaterial,
 } from './screwMesh';
+import { FACING_MIN_DOT } from './layout';
 
 const FLASH = new THREE.Color(0xffffff);
 
 /**
- * Batched renderer for the screws that are resting on plates.
+ * Batched renderer for the screws seated on the assembly.
  *
- * At the v2 scale a level holds up to 150 screws, but only the ~15-25 that no
- * plate covers may be drawn at all: with 0.02 units of air between a plate top
- * and the plate above it, a covered screw head would otherwise poke straight
- * through its own lid. Hiding them is therefore both the legibility fix and the
- * performance fix.
+ * Everything in here lives in ASSEMBLY space and is parented to the rotating
+ * group, so a drag moves the whole field (and its raycast proxies) for free.
  *
- * Everything seated is drawn from a handful of InstancedMeshes (bodies, "?"
- * decals, drill target rings, x-ray ghosts) — four draw calls for the whole
- * board no matter how many screws exist. A screw that has to animate is
- * `detach`ed into an ordinary Group for the duration, and raycast proxies exist
- * only for the small set of screws that are actually tappable right now.
+ * What is drawn (CONTRACT_V3 §6): a screw is solid and tappable only when it is
+ * REMOVABLE (the core's `blocked` flag says its withdrawal path is clear) AND
+ * FRONT-FACING (its rotated axis points toward the camera). That is v2's "do
+ * not draw covered screws" generalised to a solid: a screw on the far side of
+ * the object is exactly as unreachable as one under a plate used to be, and it
+ * keeps the draw budget in the same place. In drill targeting mode the blocked
+ * front-facing screws come back as x-ray ghosts, because drilling one is the
+ * whole point of that mode.
+ *
+ * Bodies, "?" decals, contact rings, ghosts and target rings are five
+ * InstancedMeshes regardless of screw count; per-instance matrices now carry
+ * the screw's orientation as well as its position.
  */
 export class ScrewField {
   private readonly root: THREE.Object3D;
   private readonly screws = new Map<number, ScrewVisual>();
-  private maxLayer = 0;
 
   private bodies: THREE.InstancedMesh | null = null;
   private ghosts: THREE.InstancedMesh | null = null;
@@ -45,6 +49,11 @@ export class ScrewField {
   /** id -> instance slot in `bodies` (seated screws only). */
   private slotOf = new Map<number, number>();
   private seated: ScrewVisual[] = [];
+  /** Removable screws whose axis currently points away from the camera. */
+  private away: ScrewVisual[] = [];
+  /** Reused scratch lists: flush runs on every rotated frame. */
+  private readonly ghostList: ScrewVisual[] = [];
+  private readonly proxyList: ScrewVisual[] = [];
   private hitProxies: THREE.Mesh[] = [];
   private freeProxies: THREE.Mesh[] = [];
   private hintRings: THREE.Mesh[] = [];
@@ -54,19 +63,18 @@ export class ScrewField {
   private dirty = false;
   private readonly m = new THREE.Matrix4();
   private readonly q = new THREE.Quaternion();
+  private readonly qSpin = new THREE.Quaternion();
   private readonly v3 = new THREE.Vector3();
   private readonly s3 = new THREE.Vector3();
   private readonly color = new THREE.Color();
-  private readonly zAxis = new THREE.Vector3(0, 0, 1);
 
   constructor(root: THREE.Object3D) {
     this.root = root;
   }
 
-  /** (Re)build the field for a level. `screws` may be mutated afterwards. */
-  build(screws: Iterable<ScrewVisual>, maxLayer: number): void {
+  /** (Re)build the field for a level. */
+  build(screws: Iterable<ScrewVisual>): void {
     this.clear();
-    this.maxLayer = maxLayer;
     let n = 0;
     let hidden = 0;
     for (const s of screws) {
@@ -120,21 +128,37 @@ export class ScrewField {
     this.dirty = true;
   }
 
-  /** A screw joined/left the seated set, or its cover count changed. */
+  /** A screw joined/left the seated set, or its blocked/facing state changed. */
   markDirty(): void {
     this.dirty = true;
   }
 
   /**
-   * Re-anchor the depth tint to a new top layer (as plates are peeled away) and
-   * repaint the seated instances. Cheap: colours only, no matrix rewrite.
+   * Recompute which seated screws face the camera, given the camera position
+   * expressed in ASSEMBLY space. Returns true if the drawn set changed.
+   *
+   * O(screws), no allocation: ~190 subtract + normalise + dot per rotated
+   * frame, which is nothing next to the draw it decides.
    */
-  setMaxLayer(maxLayer: number): void {
-    this.maxLayer = maxLayer;
-    const bodies = this.bodies;
-    if (!bodies) return;
-    for (let i = 0; i < this.seated.length; i++) bodies.setColorAt(i, this.instanceColor(this.seated[i]));
-    if (bodies.instanceColor) bodies.instanceColor.needsUpdate = true;
+  updateFacing(cameraLocal: THREE.Vector3): boolean {
+    let changed = false;
+    for (const s of this.screws.values()) {
+      if (s.location !== 'plate') {
+        if (s.facing) {
+          s.facing = false;
+          changed = true;
+        }
+        continue;
+      }
+      const dot = this.v3.copy(cameraLocal).sub(s.home).normalize().dot(s.axis);
+      const facing = dot >= FACING_MIN_DOT;
+      if (facing !== s.facing) {
+        s.facing = facing;
+        changed = true;
+      }
+    }
+    if (changed) this.dirty = true;
+    return changed;
   }
 
   /** Rebuild the packed instance lists if anything changed. Cheap (O(screws)). */
@@ -145,12 +169,20 @@ export class ScrewField {
     if (!bodies) return;
 
     this.seated.length = 0;
+    this.away.length = 0;
     this.slotOf.clear();
-    const ghostList: ScrewVisual[] = [];
+    const ghostList = this.ghostList;
+    ghostList.length = 0;
     for (const s of this.screws.values()) {
       if (s.location !== 'plate' || s.group) continue;
-      if (s.coverCount === 0) this.seated.push(s);
-      else if (this.targeting && s.coverCount === 1) ghostList.push(s);
+      if (s.blocked) {
+        // Only the layer the player is about to uncover: everything deeper
+        // would turn the drill overlay into soup.
+        if (this.targeting && s.facing && s.ghost) ghostList.push(s);
+        continue;
+      }
+      if (s.facing) this.seated.push(s);
+      else this.away.push(s);
     }
 
     let mi = 0;
@@ -190,14 +222,21 @@ export class ScrewField {
     if (this.rings) {
       let ri = 0;
       if (this.targeting) {
-        for (const s of this.seated) this.rings.setMatrixAt(ri++, this.ringMatrix(s));
-        for (const s of ghostList) this.rings.setMatrixAt(ri++, this.ringMatrix(s));
+        for (const s of this.seated) this.rings.setMatrixAt(ri++, this.poseMatrix(s));
+        for (const s of ghostList) this.rings.setMatrixAt(ri++, this.poseMatrix(s));
       }
       this.rings.count = ri;
       this.rings.instanceMatrix.needsUpdate = true;
     }
 
-    this.syncHitProxies(this.targeting ? [...this.seated, ...ghostList] : this.seated);
+    let proxies = this.seated;
+    if (this.targeting && ghostList.length > 0) {
+      this.proxyList.length = 0;
+      for (const s of this.seated) this.proxyList.push(s);
+      for (const s of ghostList) this.proxyList.push(s);
+      proxies = this.proxyList;
+    }
+    this.syncHitProxies(proxies);
   }
 
   /** Invisible raycast targets for the currently tappable screws. */
@@ -206,11 +245,29 @@ export class ScrewField {
     return this.hitProxies;
   }
 
-  /** Push a pooled screw's pos/rotZ/scale into its instance (no allocation). */
+  /** Ids the renderer considers tappable right now (removable ∩ front-facing). */
+  tappableIds(): number[] {
+    this.flush();
+    return this.hitProxies.map((p) => p.userData.screwId as number);
+  }
+
+  /** How many screws are drawn solid right now (removable ∩ front-facing). */
+  seatedCount(): number {
+    this.flush();
+    return this.seated.length;
+  }
+
+  /** Removable screws currently turned away from the camera (rotate affordance). */
+  offscreenRemovable(): ScrewVisual[] {
+    this.flush();
+    return this.away;
+  }
+
+  /** Push a pooled screw's pos/spin/scale into its instance (no allocation). */
   setPose(s: ScrewVisual): void {
     if (s.group) {
       s.group.position.copy(s.pos);
-      s.group.rotation.z = s.rotZ;
+      s.group.quaternion.copy(s.worldQuat);
       s.group.scale.setScalar(s.scale);
       return;
     }
@@ -238,32 +295,23 @@ export class ScrewField {
 
   /**
    * Take a screw out of the batch and give it real meshes so a tween can drive
-   * its transform. Idempotent.
+   * its transform. `worldRoot` receives the group: a screw in flight lives in
+   * WORLD space, because the boxes and the tray are fixed there and the player
+   * may keep spinning the assembly mid-flight. Idempotent.
    */
-  detach(s: ScrewVisual): THREE.Group {
+  detach(s: ScrewVisual, worldRoot: THREE.Object3D, assemblyMatrix: THREE.Matrix4): THREE.Group {
     if (s.group) return s.group;
+    // Freeze the current pose into world space before the parent changes.
+    s.pos.applyMatrix4(assemblyMatrix);
+    s.worldQuat.setFromRotationMatrix(assemblyMatrix).multiply(this.spunQuat(s));
     const group = buildLooseScrew(s);
-    this.root.add(group);
+    worldRoot.add(group);
     this.dirty = true;
     this.flush();
     return group;
   }
 
-  /** Put a still-on-plate screw back into the batch after an animation. */
-  reattach(s: ScrewVisual): void {
-    const g = s.group;
-    if (!g) return;
-    s.pos.copy(g.position);
-    s.rotZ = g.rotation.z;
-    s.scale = g.scale.x;
-    g.removeFromParent();
-    s.group = null;
-    s.body = null;
-    s.mystery = null;
-    this.dirty = true;
-  }
-
-  /** Register a screw created after `build` (never happens today, but cheap). */
+  /** Register a screw created after `build`. */
   track(s: ScrewVisual): void {
     this.screws.set(s.id, s);
     this.dirty = true;
@@ -286,6 +334,11 @@ export class ScrewField {
     for (let i = this.hintIds.length; i < this.hintRings.length; i++) this.hintRings[i].visible = false;
   }
 
+  /** Ids currently hinted that are not drawn (so the affordance can point at them). */
+  hintedIds(): number[] {
+    return this.hintIds;
+  }
+
   /** Called once per frame: pulse + position the (few) hint rings. */
   updateHint(timeMs: number): void {
     if (this.hintIds.length === 0) {
@@ -298,16 +351,18 @@ export class ScrewField {
     let used = 0;
     for (const id of this.hintIds) {
       const s = this.screws.get(id);
-      if (!s || s.location !== 'plate' || s.coverCount !== 0) continue;
+      if (!s || s.location !== 'plate' || !s.facing || s.blocked) continue;
       let ring = this.hintRings[used];
       if (!ring) {
         ring = new THREE.Mesh(screwGeometries().hintRing, hintRingMaterial());
         ring.renderOrder = 22;
+        ring.frustumCulled = false;
         this.hintRings.push(ring);
         this.root.add(ring);
       }
       ring.visible = true;
-      ring.position.set(s.pos.x, s.pos.y, s.pos.z + 0.02);
+      ring.position.copy(s.pos);
+      ring.quaternion.copy(s.quat);
       ring.scale.setScalar(k * s.scale);
       used++;
     }
@@ -323,12 +378,15 @@ export class ScrewField {
     this.bodies = this.ghosts = this.mystery = this.rings = this.contacts = null;
     for (const r of this.hintRings) r.removeFromParent();
     this.hintRings.length = 0;
+    this.ghostList.length = 0;
+    this.proxyList.length = 0;
     for (const p of [...this.hitProxies, ...this.freeProxies]) p.removeFromParent();
     this.hitProxies.length = 0;
     this.freeProxies.length = 0;
     this.screws.clear();
     this.slotOf.clear();
     this.seated.length = 0;
+    this.away.length = 0;
     this.hintIds.length = 0;
     this.targeting = false;
     this.dirty = false;
@@ -340,22 +398,20 @@ export class ScrewField {
 
   /* ------------------------------------------------------------------ */
 
-  private poseMatrix(s: ScrewVisual): THREE.Matrix4 {
-    this.q.setFromAxisAngle(this.zAxis, s.rotZ);
-    this.s3.setScalar(s.scale);
-    return this.m.compose(s.pos, this.q, this.s3);
+  /** Screw orientation including its unscrewing spin, in assembly space. */
+  private spunQuat(s: ScrewVisual): THREE.Quaternion {
+    this.qSpin.setFromAxisAngle(s.axis, s.spin);
+    return this.q.copy(this.qSpin).multiply(s.quat);
   }
 
-  private ringMatrix(s: ScrewVisual): THREE.Matrix4 {
-    this.v3.set(s.pos.x, s.pos.y, s.pos.z + 0.02);
-    this.q.identity();
-    this.s3.setScalar(1);
-    return this.m.compose(this.v3, this.q, this.s3);
+  private poseMatrix(s: ScrewVisual): THREE.Matrix4 {
+    this.s3.setScalar(s.scale);
+    return this.m.compose(s.pos, this.spunQuat(s), this.s3);
   }
 
   private instanceColor(s: ScrewVisual): THREE.Color {
     if (s.flash) return FLASH;
-    return this.color.copy(seatedScrewColor(s.color, s.revealed, s.layer, this.maxLayer));
+    return this.color.copy(seatedScrewColor(s.color, s.revealed, s.shell));
   }
 
   private syncHitProxies(list: ScrewVisual[]): void {
@@ -373,8 +429,8 @@ export class ScrewField {
       const s = list[i];
       const p = this.hitProxies[i];
       p.position.copy(s.pos);
+      p.quaternion.copy(s.quat);
       p.userData.screwId = s.id;
-      p.userData.layer = s.layer;
     }
   }
 

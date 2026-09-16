@@ -1,12 +1,13 @@
 /**
- * Minimal stand-in `Game` for the renderer dev harness, plus the small
- * hand-built level it ships with.
+ * Minimal stand-in `Game` for the renderer dev harness.
  *
- * It implements just enough of the rules to drive every GameEvent the renderer
- * animates, so the renderer can be developed and screenshot-tested while
- * src/core is being rewritten. Nothing here ships in the game bundle — only
- * render-dev.html pulls it in.
+ * It implements just enough of the v3 rules to drive every GameEvent the
+ * renderer animates — including the 3D blocking rule of CONTRACT_V3 §3 (cast
+ * the withdrawal ray and see which panels it passes through) — so the renderer
+ * can be developed and screenshot-tested while src/core is being rewritten.
+ * Nothing here ships in the game bundle; only render-dev.html pulls it in.
  */
+import * as THREE from 'three';
 import type {
   ActionResult,
   BoxState,
@@ -14,122 +15,73 @@ import type {
   GameEvent,
   GameSnapshot,
   LevelDef,
-  PlateDef,
+  PanelDef,
   PowerUpId,
   ScrewColor,
   ScrewDef,
   ScrewState,
   Vec2,
 } from '../core/types';
-import { BOX_CAPACITY } from '../core/types';
+import { ASSEMBLY_RADIUS, BOX_CAPACITY } from '../core/types';
+import { buildAssemblyLevel } from './devLevels';
 
-/* ----------------------------- fake level ------------------------------ */
-
-function rect(w: number, h: number): Vec2[] {
-  return [
-    { x: -w / 2, y: -h / 2 },
-    { x: w / 2, y: -h / 2 },
-    { x: w / 2, y: h / 2 },
-    { x: -w / 2, y: h / 2 },
-  ];
-}
-
-function roundedRect(w: number, h: number, r: number, n = 5): Vec2[] {
-  const pts: Vec2[] = [];
-  const corners = [
-    [w / 2 - r, -h / 2 + r, -Math.PI / 2],
-    [w / 2 - r, h / 2 - r, 0],
-    [-w / 2 + r, h / 2 - r, Math.PI / 2],
-    [-w / 2 + r, -h / 2 + r, Math.PI],
-  ];
-  for (const [cx, cy, a0] of corners) {
-    for (let i = 0; i <= n; i++) {
-      const a = a0 + (i / n) * (Math.PI / 2);
-      pts.push({ x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r });
-    }
-  }
-  return pts;
-}
-
-function lShape(): Vec2[] {
-  return [
-    { x: -1.6, y: -1.3 },
-    { x: 1.6, y: -1.3 },
-    { x: 1.6, y: 0.1 },
-    { x: 0.1, y: 0.1 },
-    { x: 0.1, y: 1.5 },
-    { x: -1.6, y: 1.5 },
-  ];
-}
-
-function toWorld(p: PlateDef, lx: number, ly: number): Vec2 {
-  const c = Math.cos(p.rotation);
-  const s = Math.sin(p.rotation);
-  return { x: p.x + lx * c - ly * s, y: p.y + lx * s + ly * c };
-}
-
+/** A small assembly, for eyeballing animations without 160 screws in the way. */
 export function buildFakeLevel(): LevelDef {
-  const plates: PlateDef[] = [
-    { id: 0, layer: 0, shape: { kind: 'rect', outline: rect(4.6, 3.2) }, x: 0, y: 1.6, rotation: 0.06, color: 0x3f8cf5, material: 'plastic' },
-    { id: 1, layer: 0, shape: { kind: 'roundedRect', outline: roundedRect(4.2, 2.8, 0.5) }, x: -0.3, y: -2.3, rotation: -0.08, color: 0xf2b134, material: 'plastic' },
-    { id: 2, layer: 1, shape: { kind: 'L', outline: lShape() }, x: 0.9, y: -0.1, rotation: 0.35, color: 0xe85d75, material: 'plastic' },
-    { id: 3, layer: 2, shape: { kind: 'roundedRect', outline: roundedRect(2.2, 1.4, 0.4) }, x: -1.4, y: 0.9, rotation: -0.5, color: 0x9b5de5, material: 'metal' },
-  ];
-  const p = (id: number) => plates[id];
-  const raw: { plate: number; lx: number; ly: number; color: ScrewColor; hidden?: boolean }[] = [
-    { plate: 0, lx: -1.8, ly: 1.0, color: 'red' },
-    { plate: 0, lx: -0.6, ly: 1.1, color: 'blue' },
-    { plate: 0, lx: 1.4, ly: 1.1, color: 'green' },
-    { plate: 0, lx: 0.4, ly: -0.2, color: 'yellow' },
-    { plate: 0, lx: 1.8, ly: -1.0, color: 'red' },
-    { plate: 1, lx: -1.5, ly: 0.6, color: 'blue' },
-    { plate: 1, lx: -1.4, ly: -0.7, color: 'green' },
-    { plate: 1, lx: 0.2, ly: -0.9, color: 'yellow' },
-    { plate: 2, lx: -1.1, ly: 0.9, color: 'red', hidden: true },
-    { plate: 2, lx: -0.9, ly: -0.7, color: 'blue' },
-    { plate: 2, lx: 0.9, ly: -0.7, color: 'green' },
-    { plate: 3, lx: -0.5, ly: 0.1, color: 'yellow' },
-    { plate: 3, lx: 0.5, ly: -0.1, color: 'green' },
-    { plate: 1, lx: 1.4, ly: 0.2, color: 'red' },
-    { plate: 2, lx: 0.1, ly: -0.7, color: 'yellow' },
-  ];
-  const screws: ScrewDef[] = raw.map((r, i) => {
-    const w = toWorld(p(r.plate), r.lx, r.ly);
-    return { id: i, plateId: r.plate, x: w.x, y: w.y, color: r.color, hidden: !!r.hidden };
-  });
-  // 15 screws = 5 boxes; the queue lists more than needed, extras are ignored.
-  const queue: ScrewColor[] = ['blue', 'red', 'green', 'yellow', 'red', 'green', 'yellow'];
-  return {
+  return buildAssemblyLevel({
     level: 1,
-    seed: 42,
-    plates,
-    screws,
-    boxQueue: queue,
+    seed: 7,
+    shells: 2,
+    targetScrews: 21,
+    colors: 4,
     activeBoxCount: 2,
     traySlots: 5,
-    colors: ['red', 'blue', 'green', 'yellow'],
-    difficulty: 'easy',
-  };
+  });
 }
 
-/* ------------------------------ fake game ------------------------------ */
+/* --------------------------- 3D blocking rule --------------------------- */
 
-function pointInPoly(pt: Vec2, poly: Vec2[]): boolean {
+function pointInPoly(x: number, y: number, poly: Vec2[]): boolean {
   let inside = false;
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
     const a = poly[i];
     const b = poly[j];
-    if (a.y > pt.y !== b.y > pt.y && pt.x < ((b.x - a.x) * (pt.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
   }
   return inside;
 }
 
-function plateContains(plate: PlateDef, x: number, y: number): boolean {
-  const dx = x - plate.x;
-  const dy = y - plate.y;
-  const c = Math.cos(-plate.rotation);
-  const s = Math.sin(-plate.rotation);
-  return pointInPoly({ x: dx * c - dy * s, y: dx * s + dy * c }, plate.shape.outline);
+interface PanelRay {
+  /** Inverse rotation of the panel. */
+  inv: THREE.Quaternion;
+  origin: THREE.Vector3;
+  def: PanelDef;
+}
+
+/**
+ * CONTRACT_V3 §3: transform the ray into panel-local space, intersect it with
+ * the panel's slab (local z = 0 and z = thickness) and run the 2D
+ * point-in-polygon test on the entry point.
+ */
+function rayHitsPanel(p: PanelRay, origin: THREE.Vector3, dir: THREE.Vector3, maxT: number, tmp: THREE.Vector3[]): boolean {
+  const o = tmp[0].copy(origin).sub(p.origin).applyQuaternion(p.inv);
+  const d = tmp[1].copy(dir).applyQuaternion(p.inv);
+  const th = p.def.thickness;
+  let t0: number;
+  if (Math.abs(d.z) < 1e-6) {
+    if (o.z < 0 || o.z > th) return false;
+    t0 = 0;
+  } else {
+    const ta = -o.z / d.z;
+    const tb = (th - o.z) / d.z;
+    t0 = Math.min(ta, tb);
+    const t1 = Math.max(ta, tb);
+    if (t1 < 0 || t0 > maxT) return false;
+    t0 = Math.max(0, t0);
+  }
+  const hit = tmp[2].copy(o).addScaledVector(d, t0);
+  if (!pointInPoly(hit.x, hit.y, p.def.shape.outline)) return false;
+  for (const h of p.def.shape.holes ?? []) if (pointInPoly(hit.x, hit.y, h)) return false;
+  return true;
 }
 
 export class FakeGame implements GameApi {
@@ -143,11 +95,22 @@ export class FakeGame implements GameApi {
   private nextBoxId = 0;
   private moves = 0;
   private bonus = 0;
+  private readonly rays: PanelRay[];
+  private readonly defs = new Map<number, ScrewDef>();
+  private readonly tmp = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+  private readonly rayOrigin = new THREE.Vector3();
+  private readonly rayDir = new THREE.Vector3();
 
   constructor(level: LevelDef) {
     this.level = level;
+    for (const d of level.screws) this.defs.set(d.id, d);
+    this.rays = level.panels.map((def) => ({
+      def,
+      origin: new THREE.Vector3(def.position.x, def.position.y, def.position.z),
+      inv: new THREE.Quaternion(def.rotation.x, def.rotation.y, def.rotation.z, def.rotation.w).invert(),
+    }));
     this.screws = level.screws.map((s) => ({
-      id: s.id, color: s.color, plateId: s.plateId, location: 'plate', revealed: !s.hidden, blocked: false,
+      id: s.id, color: s.color, panelId: s.panelId, location: 'plate', revealed: !s.hidden, blocked: false,
     }));
     this.tray = Array.from({ length: level.traySlots }, () => null);
     for (let i = 0; i < level.activeBoxCount; i++) this.spawnBox(i);
@@ -164,9 +127,18 @@ export class FakeGame implements GameApi {
   }
 
   private isBlocked(s: ScrewState): boolean {
-    const def = this.level.screws[s.id];
-    const layer = this.level.plates.find((p) => p.id === s.plateId)?.layer ?? 0;
-    return this.level.plates.some((p) => p.layer > layer && !this.dropped.has(p.id) && plateContains(p, def.x, def.y));
+    const def = this.defs.get(s.id);
+    if (!def) return false;
+    this.rayDir.set(def.axis.x, def.axis.y, def.axis.z).normalize();
+    // Start a hair along the axis so a screw never blocks itself.
+    this.rayOrigin.set(def.position.x, def.position.y, def.position.z).addScaledVector(this.rayDir, 0.02);
+    const maxT = 2 * ASSEMBLY_RADIUS;
+    for (const p of this.rays) {
+      if (p.def.id === s.panelId) continue;
+      if (this.dropped.has(p.def.id)) continue;
+      if (rayHitsPanel(p, this.rayOrigin, this.rayDir, maxT, this.tmp)) return true;
+    }
+    return false;
   }
 
   private refreshBlocked(): number[] {
@@ -185,10 +157,10 @@ export class FakeGame implements GameApi {
       level: this.level,
       status: this.status,
       screws: this.screws,
-      plates: this.level.plates.map((p) => ({
+      panels: this.level.panels.map((p) => ({
         id: p.id,
         dropped: this.dropped.has(p.id),
-        remainingScrews: this.screws.filter((s) => s.plateId === p.id && s.location === 'plate').map((s) => s.id),
+        remainingScrews: this.screws.filter((s) => s.panelId === p.id && s.location === 'plate').map((s) => s.id),
       })),
       boxes: this.boxes,
       nextBoxIndex: this.nextBoxIndex,
@@ -256,10 +228,10 @@ export class FakeGame implements GameApi {
   }
 
   private afterRemoval(s: ScrewState, events: GameEvent[]): void {
-    const remaining = this.screws.filter((o) => o.plateId === s.plateId && o.location === 'plate');
-    if (remaining.length === 0 && !this.dropped.has(s.plateId)) {
-      this.dropped.add(s.plateId);
-      events.push({ type: 'plateDrop', plateId: s.plateId });
+    const remaining = this.screws.filter((o) => o.panelId === s.panelId && o.location === 'plate');
+    if (remaining.length === 0 && !this.dropped.has(s.panelId)) {
+      this.dropped.add(s.panelId);
+      events.push({ type: 'panelDrop', panelId: s.panelId });
       const newly = this.refreshBlocked();
       if (newly.length) events.push({ type: 'screwsUnblocked', screwIds: newly });
       for (const id of newly) {
@@ -287,7 +259,7 @@ export class FakeGame implements GameApi {
     if (id === 'recolor') {
       const box = this.boxes.find((b) => b.screws.length === 0);
       if (!box) return { ok: false, reason: 'noEmptyBox', events: [] };
-      const colors: ScrewColor[] = ['red', 'blue', 'green', 'yellow'];
+      const colors: ScrewColor[] = this.level.colors;
       box.color = colors[(colors.indexOf(box.color) + 1) % colors.length];
       return { ok: true, events: [{ type: 'boxRecolored', boxId: box.id, color: box.color }] };
     }
@@ -304,4 +276,3 @@ export class FakeGame implements GameApi {
     return this.usePowerUp('addSlot');
   }
 }
-

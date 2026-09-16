@@ -1,108 +1,148 @@
 /**
- * The spacing rule (CONTRACT_V2 §2) and the tuning constants it is built on.
+ * The spacing rule (CONTRACT_V3 §4) and the tuning constants it is built on.
  *
- * Two screws must be `SCREW_SPACING` apart unless one of them is physically
- * hidden beneath the other's plate, because a plate only drops once all of its
- * own screws are gone — so the two are never tappable at the same time and can
- * never produce an ambiguous tap. `pairSpacingOk` is the literal predicate;
- * `ScrewIndex` is the bulk version the generator uses (a uniform grid for the
- * proximity query plus AABB-gated plate coverage tests).
+ * Two screws must not compete for the same tap. In 3D "the same tap" depends on
+ * where they point:
+ *
+ *   - axes within 90 degrees of each other (dot > 0): both can be presented
+ *     face-on from one camera angle, so they need the full `SCREW_SPACING` of
+ *     3D separation, exactly as v2 demanded in the plane;
+ *   - axes 90 degrees apart or more (dot <= 0): no single angle shows both
+ *     face-on — turn towards one and the other is edge-on or behind — so they
+ *     only need enough room that the heads do not physically interpenetrate,
+ *     2 * SCREW_HEAD_R.
+ *
+ * On top of that, v2's coverage exemption carries over unchanged in meaning:
+ * screws that can NEVER be removable at the same time cannot produce an
+ * ambiguous tap however close they are. In v2 that was "one sits under the
+ * other's plate"; in 3D it is the exact generalisation — screw B's withdrawal
+ * ray passes through screw A's panel P. Then B is blocked until P falls, and P
+ * only falls once every screw on it, including A, is gone. So A and B are never
+ * simultaneously removable. Same proof, same guarantee.
+ *
+ * `ScrewIndex3` is the bulk version the generator uses: a uniform 3D hash grid
+ * with SCREW_SPACING cells, so a candidate only ever compares against the 27
+ * neighbouring cells.
  */
-import type { PlateDef } from './types';
-import { plateContainsWorldPoint, plateWorldOutline, polygonAabb, type Aabb } from './geometry';
+import type { Vec3 } from './types';
 
-export const BOARD = { minX: -3.35, maxX: 3.35, minY: -4.2, maxY: 4.2 };
-export const SCREW_EDGE_MARGIN = 0.34;
+/** CONTRACT_V3 §4 — carried over from v2 unchanged. */
 export const SCREW_SPACING = 0.82;
-export const PLATE_GAP = 0.1;
+export const SCREW_EDGE_MARGIN = 0.34;
+export const SCREW_HEAD_R = 0.23;
+export const SCREW_HIT_R = 0.41;
+/** Clearance kept between two panels' bodies so they never interpenetrate. */
+export const PANEL_GAP = 0.04;
+
+/** Separation two screw heads need just to not overlap each other. */
+export const HEAD_CLEARANCE = 2 * SCREW_HEAD_R;
 
 const SPACING2 = SCREW_SPACING * SCREW_SPACING;
+const HEAD2 = HEAD_CLEARANCE * HEAD_CLEARANCE;
 
-/** A placed screw position, before colours are assigned. */
-export interface ScrewSpot { plateId: number; x: number; y: number }
-
-/**
- * CONTRACT_V2 §2: spacing between two screws is NOT required when one of them
- * is hidden beneath the other's plate, because a plate only drops once all of
- * its own screws are gone — so the two are never tappable at the same time.
- * Screws on the same layer (and on the same plate) are never exempt.
- */
-export function coverageExempt(a: PlateDef, ax: number, ay: number, b: PlateDef, bx: number, by: number): boolean {
-  if (a.layer > b.layer && plateContainsWorldPoint(a, bx, by)) return true;
-  if (b.layer > a.layer && plateContainsWorldPoint(b, ax, ay)) return true;
-  return false;
-}
-
-/** True when two screws may coexist: far enough apart, or covered (§2). */
-export function pairSpacingOk(a: PlateDef, ax: number, ay: number, b: PlateDef, bx: number, by: number): boolean {
-  const dx = ax - bx;
-  const dy = ay - by;
-  if (dx * dx + dy * dy >= SPACING2) return true;
-  return coverageExempt(a, ax, ay, b, bx, by);
+/** A placed screw, before colours are assigned. */
+export interface ScrewSpot {
+  panelId: number;
+  position: Vec3;
+  axis: Vec3;
 }
 
 /**
- * Bulk version of `pairSpacingOk` for generation. Screws go into a uniform grid
- * with cell size SCREW_SPACING, so a proximity query only ever scans the 3x3
- * cell block around the candidate; the (rare) close pairs are then resolved
- * with an AABB-gated point-in-plate test. O(1) amortised per candidate.
+ * Axes this close to perpendicular count as perpendicular. Chassis faces are
+ * built at exactly 90 degrees, and a float dot product of 1e-17 must not flip
+ * a whole seam of screws into the strict rule.
  */
-export class ScrewIndex {
-  private readonly aabbs: Aabb[];
+const PERPENDICULAR_EPS = 1e-6;
+
+/** How far apart two screws must be, given the angle between their axes (§4). */
+export function requiredSeparation(axisA: Vec3, axisB: Vec3): number {
+  const dot = axisA.x * axisB.x + axisA.y * axisB.y + axisA.z * axisB.z;
+  return dot > PERPENDICULAR_EPS ? SCREW_SPACING : HEAD_CLEARANCE;
+}
+
+function separationOk(a: ScrewSpot, b: ScrewSpot): boolean {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  const dz = a.position.z - b.position.z;
+  const d2 = dx * dx + dy * dy + dz * dz;
+  const dot = a.axis.x * b.axis.x + a.axis.y * b.axis.y + a.axis.z * b.axis.z;
+  return d2 >= (dot > PERPENDICULAR_EPS ? SPACING2 : HEAD2);
+}
+
+/**
+ * The v2 coverage exemption, generalised: true when the two screws can never be
+ * removable at the same time, because one of them is blocked by the other's
+ * panel. `blockersA` / `blockersB` are the panel IDS each screw's ray passes
+ * through (see ./blocking, which returns indices — pass ids here).
+ */
+export function coverageExempt(
+  a: ScrewSpot, blockersA: readonly number[],
+  b: ScrewSpot, blockersB: readonly number[],
+): boolean {
+  return blockersB.includes(a.panelId) || blockersA.includes(b.panelId);
+}
+
+/** True when two screws may coexist: far enough apart (§4), or never both removable. */
+export function pairSpacingOk(
+  a: ScrewSpot, b: ScrewSpot,
+  blockersA: readonly number[] = [], blockersB: readonly number[] = [],
+): boolean {
+  if (separationOk(a, b)) return true;
+  // Heads must never physically interpenetrate, exemption or not.
+  return coverageExempt(a, blockersA, b, blockersB) && !headsOverlap(a, b);
+}
+
+function headsOverlap(a: ScrewSpot, b: ScrewSpot): boolean {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  const dz = a.position.z - b.position.z;
+  return dx * dx + dy * dy + dz * dz < HEAD2;
+}
+
+/**
+ * Uniform 3D grid over placed screws. A candidate is compared only against the
+ * 27 cells around it (cell size = SCREW_SPACING, the largest separation the
+ * rule can ask for), which makes placement O(1) amortised per candidate.
+ */
+export class ScrewIndex3 {
   private readonly cells = new Map<number, number[]>();
-  private readonly sx: number[] = [];
-  private readonly sy: number[] = [];
-  private readonly sp: number[] = [];
+  private readonly spots: ScrewSpot[] = [];
+  private readonly blockers: number[][] = [];
 
-  constructor(private readonly plates: readonly PlateDef[]) {
-    this.aabbs = plates.map((p) => polygonAabb(plateWorldOutline(p)));
+  get size(): number { return this.spots.length; }
+
+  private static key(ix: number, iy: number, iz: number): number {
+    return ((ix + 64) * 128 + (iy + 64)) * 128 + (iz + 64);
   }
 
-  get size(): number { return this.sx.length; }
+  private static cell(v: number): number { return Math.floor(v / SCREW_SPACING); }
 
-  private static key(ix: number, iy: number): number { return (ix + 512) * 4096 + (iy + 512); }
-
-  /** Plate `pi` physically covers the world point (AABB pre-filter first). */
-  private covers(pi: number, x: number, y: number): boolean {
-    const a = this.aabbs[pi];
-    if (x < a.minX || x > a.maxX || y < a.minY || y > a.maxY) return false;
-    return plateContainsWorldPoint(this.plates[pi], x, y);
-  }
-
-  /** May a screw for plate index `pi` be placed at (x, y)? */
-  canPlace(pi: number, x: number, y: number): boolean {
-    const layer = this.plates[pi].layer;
-    const ix = Math.floor(x / SCREW_SPACING);
-    const iy = Math.floor(y / SCREW_SPACING);
+  /** May a screw be placed here, given the panel ids its ray would cross? */
+  canPlace(spot: ScrewSpot, blockers: readonly number[]): boolean {
+    const ix = ScrewIndex3.cell(spot.position.x);
+    const iy = ScrewIndex3.cell(spot.position.y);
+    const iz = ScrewIndex3.cell(spot.position.z);
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
-        const list = this.cells.get(ScrewIndex.key(ix + dx, iy + dy));
-        if (list === undefined) continue;
-        for (let k = 0; k < list.length; k++) {
-          const j = list[k];
-          const ddx = this.sx[j] - x;
-          const ddy = this.sy[j] - y;
-          if (ddx * ddx + ddy * ddy >= SPACING2) continue;
-          const qi = this.sp[j];
-          const qLayer = this.plates[qi].layer;
-          if (qLayer > layer) {
-            if (this.covers(qi, x, y)) continue;   // candidate hides under the neighbour's plate
-          } else if (layer > qLayer) {
-            if (this.covers(pi, this.sx[j], this.sy[j])) continue; // neighbour hides under ours
+        for (let dz = -1; dz <= 1; dz++) {
+          const list = this.cells.get(ScrewIndex3.key(ix + dx, iy + dy, iz + dz));
+          if (list === undefined) continue;
+          for (const j of list) {
+            if (!pairSpacingOk(spot, this.spots[j], blockers, this.blockers[j])) return false;
           }
-          return false;
         }
       }
     }
     return true;
   }
 
-  add(pi: number, x: number, y: number): void {
-    const j = this.sx.length;
-    this.sx.push(x);
-    this.sy.push(y);
-    this.sp.push(pi);
-    const key = ScrewIndex.key(Math.floor(x / SCREW_SPACING), Math.floor(y / SCREW_SPACING));
+  add(spot: ScrewSpot, blockers: readonly number[]): void {
+    const j = this.spots.length;
+    this.spots.push(spot);
+    this.blockers.push([...blockers]);
+    const key = ScrewIndex3.key(
+      ScrewIndex3.cell(spot.position.x), ScrewIndex3.cell(spot.position.y), ScrewIndex3.cell(spot.position.z),
+    );
     const list = this.cells.get(key);
     if (list) list.push(j);
     else this.cells.set(key, [j]);
@@ -110,16 +150,15 @@ export class ScrewIndex {
 }
 
 /** Brute-force check of the whole rule set (tests / sweep verification). */
-export function spacingViolations(plates: readonly PlateDef[], screws: readonly ScrewSpot[]): [number, number][] {
-  const byId = new Map(plates.map((p) => [p.id, p]));
+export function spacingViolations(
+  screws: readonly ScrewSpot[],
+  blockerIds: readonly (readonly number[])[],
+): [number, number][] {
   const out: [number, number][] = [];
   for (let i = 0; i < screws.length; i++) {
     for (let j = i + 1; j < screws.length; j++) {
-      const a = screws[i];
-      const b = screws[j];
-      if (!pairSpacingOk(byId.get(a.plateId)!, a.x, a.y, byId.get(b.plateId)!, b.x, b.y)) out.push([i, j]);
+      if (!pairSpacingOk(screws[i], screws[j], blockerIds[i] ?? [], blockerIds[j] ?? [])) out.push([i, j]);
     }
   }
   return out;
 }
-

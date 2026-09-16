@@ -174,14 +174,20 @@ function scalePoly(poly: readonly Vec2[], sx: number, sy: number): Vec2[] {
  * result keeps enough body thickness for a screw with SCREW_EDGE_MARGIN.
  */
 export function fittedShape(kind: PlateShapeKind, hw: number, hh: number, rng: Rng): PlateShape {
-  hw = Math.max(0.55, hw);
-  hh = Math.max(0.55, hh);
+  // The floor is just enough body for one screw plus its edge margin. It must
+  // never inflate a panel the caller sized deliberately: the assembly builder
+  // quantises panels to whole screw columns and steps them down when they foul
+  // a neighbour, and a silent minimum size defeats both.
+  hw = Math.max(0.36, hw);
+  hh = Math.max(0.36, hh);
   const small = Math.min(hw, hh);
   const big = Math.max(hw, hh);
   const along = hw >= hh;
   switch (kind) {
     case 'rect': return rectShape(hw, hh);
-    case 'roundedRect': return roundedRectShape(hw, hh, small * rng.float(0.18, 0.45));
+    // Small corner radii on purpose: a screw needs SCREW_EDGE_MARGIN of clear
+    // body, and a fat rounded corner silently costs a panel its corner screws.
+    case 'roundedRect': return roundedRectShape(hw, hh, small * rng.float(0.1, 0.24));
     case 'circle': return finish('circle', scalePoly(circleShape(1, 24).outline, hw, hh));
     case 'L': {
       const t = Math.min(2 * small * 0.8, Math.max(MIN_ARM_THICKNESS, small * rng.float(0.95, 1.35)));

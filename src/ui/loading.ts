@@ -1,10 +1,10 @@
 /**
  * Level loading overlay.
  *
- * Building a deep level can take up to ~2 s (CONTRACT_V2 §7), so the tap that
+ * Building a deep level can take up to ~2 s (CONTRACT_V3 §7), so the tap that
  * starts a level must produce something on screen immediately: a skeleton of the
- * board, the level number the player asked for, and a spinner that keeps moving
- * (generation itself runs in a worker, see levelLoader.ts).
+ * assembly, the level number the player asked for, and a spinner that keeps
+ * moving (generation itself runs in a worker, see levelLoader.ts).
  */
 import { difficultyFor } from '../core';
 import type { LevelDef } from '../core/types';
@@ -29,8 +29,8 @@ export interface LoadingOptions {
 
 /** Shown in order, one per stage, while the level is being built. */
 const BUILD_STAGES = [
-  'Laying out the towers…',
-  'Stacking the plates…',
+  'Welding up the frame…',
+  'Bolting on the panels…',
   'Checking every screw can be reached…',
 ];
 
@@ -43,16 +43,16 @@ export function createLoadingOverlay(o: LoadingOptions): LoadingOverlay {
   const badge = h('span', { class: 'diff-badge normal' }, 'normal');
   const stage = h('div', { class: 'ld-stage' }, BUILD_STAGES[0]);
   const spinner = h('div', { class: 'ld-spinner' }, svg(ICONS.screwHead));
-  // Sets expectations for the wait: a level 700+ board really is ~150 screws deep.
+  // Sets expectations for the wait: a level 700+ model really is ~150 screws deep.
   const shape = h('div', { class: 'ld-shape' });
   const bar = h('div', { class: 'ld-bar' }, h('i'));
   const skeleton = h(
     'div',
     { class: 'ld-skeleton', 'aria-hidden': 'true' },
     Array.from({ length: 6 }, (_, i) => {
-      const plate = h('span', { class: `ld-plate p${i}` });
-      plate.style.animationDelay = `${i * 0.16}s`;
-      return plate;
+      const panel = h('span', { class: `ld-panel p${i}` });
+      panel.style.animationDelay = `${i * 0.16}s`;
+      return panel;
     }),
   );
 
@@ -102,8 +102,15 @@ export function createLoadingOverlay(o: LoadingOptions): LoadingOverlay {
       badge.textContent = difficulty;
       badge.className = `diff-badge ${difficulty}`;
       badge.style.display = '';
+      // The cheap, pure difficulty path — NEVER generateLevel (CONTRACT_V3 §7).
       const d = difficultyFor(level);
-      shape.replaceChildren(`≈${d.screws} screws`, h('i'), `${d.layers} layers`);
+      shape.replaceChildren(
+        `≈${d.screws} screws`,
+        h('i'),
+        `${d.panels} panels`,
+        h('i'),
+        `${d.shells} ${d.shells === 1 ? 'shell' : 'shells'}`,
+      );
       shape.style.display = '';
       stage.textContent = stages[0];
       bar.style.display = '';

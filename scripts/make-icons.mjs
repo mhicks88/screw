@@ -58,7 +58,7 @@ export function iconSvg({ size = 512, maskable = false, radius = 0.22 } = {}) {
   <rect x="0" y="0" width="${s}" height="${s}" rx="${r}" ry="${r}" fill="url(#bg)"/>
   <!-- soft highlight in the corner -->
   <circle cx="${s * 0.22}" cy="${s * 0.18}" r="${s * 0.5}" fill="url(#glow)"/>
-  <!-- little plate behind the screw -->
+  <!-- little panel behind the screw -->
   <rect x="${cx - R * 1.35}" y="${cy - R * 1.05}" width="${R * 2.7}" height="${R * 2.1}" rx="${R * 0.35}"
         fill="#2ec4d6" opacity="0.95" transform="rotate(-8 ${cx} ${cy})" filter="url(#shadow)"/>
   <rect x="${cx - R * 1.35}" y="${cy - R * 1.05}" width="${R * 2.7}" height="${R * 0.5}" rx="${R * 0.25}"
