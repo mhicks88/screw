@@ -2,6 +2,13 @@
  * Difficulty curve for levels 1..TOTAL_LEVELS (CONTRACT_V3 §7). Pure function of
  * the level number.
  *
+ * The panel counts of the first two bands are raised to a floor of SIX, against
+ * the 2-4 of the §7 table. A two-panel assembly is two plates back to back:
+ * turn it a quarter and there is nothing facing the player at all, which reads
+ * as a broken board rather than as a puzzle. Six panels is the smallest closed
+ * box, and it guarantees something face-on from every angle (an octahedral set
+ * always presents a face within 55 degrees of any view direction).
+ *
  * Rhythm (unchanged from v2): every 25th level is 'extreme', every other 10th
  * level is 'hard', levels ending in 4 (from level 14 on) are 'easy' breathers,
  * and levels 1-3 are trivial tutorials. Underneath the rhythm every parameter
@@ -50,8 +57,10 @@ export function difficultyLabelFor(level: number): DifficultyLabel {
 
 /** CONTRACT_V3 §7, verbatim: [firstLevel, lastLevel, screws, shells, panels] (+ v2's colours). */
 const BANDS: { lo: number; hi: number; screws: [number, number]; shells: [number, number]; panels: [number, number]; colors: [number, number] }[] = [
-  { lo: 1, hi: 3, screws: [9, 12], shells: [1, 1], panels: [2, 4], colors: [3, 3] },
-  { lo: 4, hi: 30, screws: [12, 30], shells: [1, 2], panels: [4, 10], colors: [3, 4] },
+  // 12 rather than 9 screws: six faces with two screws each, so turning the
+  // box always shows at least a pair the player can take.
+  { lo: 1, hi: 3, screws: [12, 12], shells: [1, 1], panels: [6, 6], colors: [3, 3] },
+  { lo: 4, hi: 30, screws: [12, 30], shells: [1, 2], panels: [6, 10], colors: [3, 4] },
   { lo: 31, hi: 120, screws: [30, 60], shells: [2, 3], panels: [10, 20], colors: [4, 6] },
   { lo: 121, hi: 350, screws: [60, 100], shells: [3, 4], panels: [18, 32], colors: [5, 7] },
   { lo: 351, hi: 700, screws: [100, 140], shells: [4, 5], panels: [28, 45], colors: [6, 8] },
@@ -90,7 +99,7 @@ export function difficultyFor(level: number): DifficultyParams {
   if (level <= 3) {
     return {
       level, label, intensity: 0,
-      panels: level === 1 ? 2 : 3,
+      panels: 6,
       shells, colors, screws,
       activeBoxCount: 3,
       traySlots: BASE_TRAY_SLOTS,

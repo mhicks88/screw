@@ -17,7 +17,7 @@
  * a legal move always exists. What the bot play-through actually proves is that
  * the COLOUR and TRAY economy works out.
  */
-import { ALL_COLORS, BOX_CAPACITY, type LevelDef, type PanelDef, type ScrewColor, type ScrewDef } from './types';
+import { ALL_COLORS, BOX_CAPACITY, type LevelDef, type PanelDef, type ScrewColor, type ScrewDef, type Vec3 } from './types';
 import { Rng, hashSeed } from './rng';
 import { difficultyFor, TOTAL_LEVELS, type DifficultyParams } from './difficulty';
 import { buildAssembly, outerShellFraction, shellCount, trimScrews, type Assembly } from './assembly';
@@ -88,6 +88,49 @@ export function simulateWithLazyQueue(def: LevelDef, seed: number): BotResult & 
   return { ...res, queue: [...game.peekQueue()] };
 }
 
+/* -------------------------------------------- view coverage (§6, §7) */
+
+/**
+ * Evenly spread view directions (a Fibonacci sphere). The renderer only draws
+ * and hit-tests screws that are removable AND front-facing, so "how many screws
+ * can the player actually tap right now" depends on where the object has been
+ * turned to — and the answer must never be zero, from any angle.
+ */
+const VIEW_DIRS: Vec3[] = (() => {
+  const n = 40;
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  const out: Vec3[] = [];
+  for (let i = 0; i < n; i++) {
+    const z = 1 - (2 * (i + 0.5)) / n;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    const phi = i * golden;
+    out.push({ x: r * Math.cos(phi), y: r * Math.sin(phi), z });
+  }
+  return out;
+})();
+
+/** A screw is drawn (and tappable) when its axis points somewhat at the camera. */
+const FACING_DOT = 0.35;
+
+/**
+ * Fewest screws that are removable AND front-facing, over every sampled view
+ * direction. This is the count the player can actually tap after turning the
+ * assembly to the worst angle for them.
+ */
+export function minViewFacing(def: LevelDef, removableIds: readonly number[]): number {
+  const axes = new Map(def.screws.map((s) => [s.id, s.axis]));
+  let worst = Infinity;
+  for (const v of VIEW_DIRS) {
+    let n = 0;
+    for (const id of removableIds) {
+      const a = axes.get(id)!;
+      if (a.x * v.x + a.y * v.y + a.z * v.z > FACING_DOT) n++;
+    }
+    if (n < worst) worst = n;
+  }
+  return Number.isFinite(worst) ? worst : 0;
+}
+
 /* ------------------------------------------------ non-linearity (§7) */
 
 export interface LevelStats {
@@ -113,6 +156,12 @@ export interface LevelStats {
   startBoxColors: number;
   /** Mean number of distinct colours among the active boxes over the play-through. */
   avgBoxColors: number;
+  /**
+   * Over sampled view directions and sampled moments of the play-through, the
+   * fewest screws that are at once removable and front-facing — what the player
+   * can tap after turning the assembly to the least helpful angle (§6).
+   */
+  minViewFacing: number;
   /** Taps in the proven winning line (one per screw). */
   steps: number;
 }
@@ -122,6 +171,8 @@ export interface NonLinearityTargets {
   minReachable: number;
   avgFronts: number;
   maxChokeRun: number;
+  /** Fewest removable, front-facing screws from the worst view direction (§6). */
+  minViewFacing: number;
   /** Distinct colours the starting boxes must show (§7: N boxes, N fronts). */
   startBoxColors: number;
 }
@@ -135,18 +186,36 @@ export function nonLinearityTargets(level: number): NonLinearityTargets {
   const params = difficultyFor(level);
   // Every starting box must want a different colour whenever the palette allows.
   const startBoxColors = Math.min(params.activeBoxCount, params.colors);
-  if (level <= 5) return { avgReachable: 0, minReachable: 1, avgFronts: 0, maxChokeRun: 999, startBoxColors };
+  // Turning the assembly must never show an empty board: whatever angle the
+  // player lands on, some screws are face-on and removable.
+  // Small assemblies have less material to present at once; big ones must
+  // always offer a real choice whichever way they are turned.
+  const viewFloor = level <= 350 ? 2 : 3;
+  if (level <= 5) return { avgReachable: 0, minReachable: 1, avgFronts: 0, maxChokeRun: 999, minViewFacing: viewFloor, startBoxColors };
   const s = Math.min(1, (level - 5) / 45);
   return {
     avgReachable: 3 + 5 * s,
     minReachable: s >= 1 ? 3 : s > 0.5 ? 2 : 1,
     avgFronts: 1.2 + 1.8 * s,
     maxChokeRun: Math.round(10 - 7 * s),
+    minViewFacing: viewFloor,
     startBoxColors,
   };
 }
 
 const TAIL = 5; // the last few moves of any level are necessarily forced
+
+/**
+ * Worst view over the play-through, ignoring its final stretch: the last few
+ * screws of any level are wherever they are, and one of them is the last screw
+ * on the board. Everything before that has to keep the assembly tappable from
+ * every angle.
+ */
+function viewFloorOf(def: LevelDef, samples: readonly number[][]): number {
+  if (samples.length === 0) return 0;
+  const body = samples.slice(0, Math.max(1, samples.length - 2));
+  return body.reduce((m, ids) => Math.min(m, minViewFacing(def, ids)), Infinity);
+}
 
 function statsFrom(def: LevelDef, res: BotResult): LevelStats {
   const reach = res.reachPerStep ?? [];
@@ -173,6 +242,7 @@ function statsFrom(def: LevelDef, res: BotResult): LevelStats {
     maxChokeRun: maxRun,
     startBoxColors: boxColors.length ? boxColors[0] : 0,
     avgBoxColors: mean(boxColors),
+    minViewFacing: viewFloorOf(def, res.reachSamples ?? []),
     steps: res.steps,
   };
 }
@@ -196,7 +266,8 @@ export function winningMoves(def: LevelDef): number[] {
 }
 
 function meetsTargets(stats: LevelStats, targets: NonLinearityTargets): boolean {
-  return stats.avgReachable >= targets.avgReachable
+  return stats.minViewFacing >= targets.minViewFacing
+    && stats.avgReachable >= targets.avgReachable
     && stats.minReachable >= targets.minReachable
     && stats.avgFronts >= targets.avgFronts
     && stats.maxChokeRun < Math.max(4, targets.maxChokeRun + 1)
@@ -272,6 +343,10 @@ function quality(stats: LevelStats, t: NonLinearityTargets, params: DifficultyPa
   // A solid whose screws all sit on the skin is a flat board again.
   q -= 3.0 * Math.max(0, stats.outerShellFraction - 0.45);
   q -= 2.0 * Math.max(0, t.startBoxColors - stats.startBoxColors);
+  // An angle with nothing on it is the worst thing a 3D level can do, so this
+  // is scored steeply rather than as one criterion among many.
+  q -= 6.0 * Math.max(0, t.minViewFacing - stats.minViewFacing);
+  q += 0.5 * Math.min(4, Math.max(0, stats.minViewFacing - t.minViewFacing));
   return q;
 }
 
@@ -292,12 +367,20 @@ export function generateLevel(level: number): LevelDef {
   const params = difficultyFor(level);
   const targets = nonLinearityTargets(level);
   const budget = attemptBudget(params);
-  // Tier 1: right size + shells AND every §7 criterion. Tier 2: right size and
-  // shells. Tier 3: anything winnable. The best candidate of the highest
-  // non-empty tier wins, so a level never silently shrinks out of its band.
+  /*
+   * Tier 1: the right size AND every §7 criterion. Tier 2: every criterion, a
+   * little small. Tier 3: the right size but some criterion missed. Tier 4:
+   * anything winnable. The best candidate of the highest non-empty tier wins.
+   *
+   * How a level PLAYS outranks how big it is — a level that is 8% short but
+   * offers screws from every angle is a better level than a full-size one the
+   * player can turn to an empty view — while a level still never silently
+   * shrinks out of its band when a full-size candidate plays just as well.
+   */
   const tier1: Candidate[] = [];
   const tier2: Candidate[] = [];
   const tier3: Candidate[] = [];
+  const tier4: Candidate[] = [];
   const keep = (list: Candidate[], c: Candidate) => {
     list.push(c);
     list.sort((a, b) => b.score - a.score);
@@ -329,12 +412,22 @@ export function generateLevel(level: number): LevelDef {
     // no matter how many panels are reachable — never ship that.
     if (stats.startBoxColors < targets.startBoxColors) continue;
     const c: Candidate = { def: final, stats, score: quality(stats, targets, params), attempt };
-    const rightSize = count >= target * 0.92 && stats.shells >= params.shells - 1;
-    keep(rightSize ? (meetsTargets(stats, targets) ? tier1 : tier2) : tier3, c);
+    const rightSize = count >= target * 0.92
+      && stats.shells >= params.shells
+      && stats.panels >= params.panels * 0.75;
+    // Tier 2 is for levels that play well but came out a little small. "A
+    // little" has a floor: a six-panel single-shell assembly in a band that
+    // promises twenty panels is a different game, and the loading card has
+    // already told the player what to expect.
+    const nearSize = count >= target * 0.85
+      && stats.shells >= params.shells - 1
+      && stats.panels >= params.panels * 0.6;
+    const plays = meetsTargets(stats, targets);
+    keep(rightSize ? (plays ? tier1 : tier3) : (plays && nearSize ? tier2 : tier4), c);
   }
 
   // Prefer a level that meets every criterion; fall back to the best seen.
-  for (const list of [tier1, tier2, tier3]) {
+  for (const list of [tier1, tier2, tier3, tier4]) {
     for (const c of list) {
       const runs = naiveRuns(c.stats.screws);
       const { max, min } = naiveWinLimits(level, params);

@@ -2,6 +2,7 @@ export * from './types';
 export { TOTAL_LEVELS, MAX_TRAY_SLOTS, difficultyFor, difficultyLabelFor, bandFor, type DifficultyParams, type DifficultyLabel } from './difficulty';
 export {
   generateLevel, simulateWithLazyQueue, lastGenerationStats, measureLevel, nonLinearityTargets, winningMoves,
+  minViewFacing,
   type LevelStats, type GenerationStats, type NonLinearityTargets,
 } from './generator';
 export {

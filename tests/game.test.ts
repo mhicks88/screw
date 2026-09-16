@@ -7,11 +7,11 @@ const types = (ev: GameEvent[]) => ev.map((e) => e.type);
 
 describe('blocking', () => {
   const level = makeLevel({
-    plates: [BASE, COVER],
+    panels: [BASE, COVER],
     screws: [screw(0, 0, 1.5, 1.5, 'red'), screw(1, 0, -1.5, -1.5, 'blue'), screw(2, 1, 1.8, 1.8, 'green')],
     boxQueue: ['red'], activeBoxCount: 1,
   });
-  it('screws under a higher plate are blocked, others reachable', () => {
+  it('screws under a higher panel are blocked, others reachable', () => {
     const g = new Game(level);
     expect(g.reachableScrewIds().sort()).toEqual([1, 2]);
     const snap = g.snapshot();
@@ -37,7 +37,7 @@ describe('blocking', () => {
 
 describe('tray / box flow and chaining', () => {
   const flowLevel = () => makeLevel({
-    plates: [BASE],
+    panels: [BASE],
     screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 1, 3), ...row(6, 'green', -1, 3)],
     boxQueue: ['red', 'blue', 'green'], activeBoxCount: 1,
   });
@@ -74,17 +74,17 @@ describe('tray / box flow and chaining', () => {
     expect(s.tray.every((t) => t === null)).toBe(true);
     expect(s.nextBoxIndex).toBe(3);
     expect(s.removedScrews).toBe(7);
-    // last screws: complete, no spawn (queue exhausted), plate drops, win
+    // last screws: complete, no spawn (queue exhausted), panel drops, win
     g.tapScrew(7);
     const last = g.tapScrew(8);
-    expect(types(last.events)).toEqual(['screwToBox', 'boxComplete', 'plateDrop', 'win']);
+    expect(types(last.events)).toEqual(['screwToBox', 'boxComplete', 'panelDrop', 'win']);
     expect(g.snapshot().status).toBe('won');
     expect(g.snapshot().screws.every((s) => s.location === 'gone')).toBe(true);
     expect(g.tapScrew(0).reason).toBe('notPlaying');
   });
   it('auto-moves take the OLDEST tray screw first, not the lowest slot', () => {
     const level = makeLevel({
-      plates: [BASE],
+      panels: [BASE],
       screws: [...row(0, 'red', 3, 3), ...row(3, 'green', 2, 3), ...row(6, 'yellow', 1, 3), ...row(9, 'blue', 0, 3)],
       boxQueue: ['red', 'green', 'yellow', 'blue'], activeBoxCount: 1,
     });
@@ -102,9 +102,9 @@ describe('tray / box flow and chaining', () => {
   });
 });
 
-describe('plate drop, unblocking and mystery reveal', () => {
+describe('panel drop, unblocking and mystery reveal', () => {
   const level = makeLevel({
-    plates: [BASE, COVER],
+    panels: [BASE, COVER],
     screws: [screw(0, 0, 1.5, 1.5, 'red', true), screw(1, 1, 1.8, 1.8, 'red'), screw(2, 0, -1.5, -1.5, 'blue')],
     boxQueue: ['blue', 'red'], activeBoxCount: 2,
   });
@@ -116,21 +116,21 @@ describe('plate drop, unblocking and mystery reveal', () => {
     const r = g.tapScrew(1);
     expect(r.events).toEqual([
       { type: 'screwToBox', screwId: 1, boxId: 1, boxSlot: 0, from: 'plate' },
-      { type: 'plateDrop', plateId: 1 },
+      { type: 'panelDrop', panelId: 1 },
       { type: 'screwsUnblocked', screwIds: [0] },
       { type: 'screwRevealed', screwId: 0, color: 'red' },
     ]);
     s0 = g.snapshot().screws[0];
     expect(s0.revealed).toBe(true);
     expect(s0.blocked).toBe(false);
-    expect(g.snapshot().plates.find((p) => p.id === 1)!.dropped).toBe(true);
+    expect(g.snapshot().panels.find((p) => p.id === 1)!.dropped).toBe(true);
     expect(g.reachableScrewIds().sort()).toEqual([0, 2]);
   });
 });
 
 describe('losing and continuing', () => {
   const level = makeLevel({
-    plates: [BASE],
+    panels: [BASE],
     screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 1, 3), ...row(6, 'blue', -1, 3)],
     boxQueue: ['red', 'blue', 'blue'], activeBoxCount: 1,
   });
@@ -167,7 +167,7 @@ describe('losing and continuing', () => {
 describe('snapshots', () => {
   it('are deep copies and can rebuild an equivalent game', () => {
     const level = makeLevel({
-      plates: [BASE, COVER],
+      panels: [BASE, COVER],
       screws: [screw(0, 0, 1.5, 1.5, 'red', true), screw(1, 1, 1.8, 1.8, 'red'), screw(2, 0, -1.5, -1.5, 'blue'), screw(3, 0, -1.5, 2, 'red')],
       boxQueue: ['blue', 'red'], activeBoxCount: 2,
     });
@@ -177,12 +177,12 @@ describe('snapshots', () => {
     const a = g.snapshot();
     a.tray[0] = 999;
     a.boxes[0].screws.push(42);
-    a.level.plates[0].shape.outline[0].x = 123;
+    a.level.panels[0].shape.outline[0].x = 123;
     a.screws[0].location = 'gone';
     const b = g.snapshot();
     expect(b.tray[0]).toBe(null);
     expect(b.boxes[0].screws).toEqual([2]);
-    expect(b.level.plates[0].shape.outline[0].x).toBe(-2.8);
+    expect(b.level.panels[0].shape.outline[0].x).toBe(-2.8);
     expect(b.screws[0].location).toBe('plate');
     const g2 = Game.fromSnapshot(b);
     expect(g2.snapshot()).toEqual(b);

@@ -32,7 +32,7 @@ import { ASSEMBLY_RADIUS, type PanelDef, type PlateShapeKind, type Quat, type Ve
 import { Rng } from './rng';
 import { distanceToPolygonEdge, pointInShape, polygonAabb } from './geometry';
 import {
-  PanelBvh, addV3, angleBetween, crossV3, dotV3, lengthV3, normalizeV3, perpendicularTo, subV3, panelFacePoint, panelMaxRadius, panelNormal, panelObb, obbOverlap,
+  PanelBvh, addV3, angleBetween, crossV3, dotV3, lengthV3, normalizeV3, panelToAssembly, perpendicularTo, subV3, panelFacePoint, panelMaxRadius, panelNormal, panelObb, obbOverlap,
   quatFromAxisAngle, quatFromFrame, quatMul, quatRotate, scaleV3, v3, type Obb,
 } from './geometry3';
 import { RAY_LENGTH, rayOriginFor } from './blocking';
@@ -80,7 +80,7 @@ const BRACKET_KINDS: PlateShapeKind[] = ['hexagon', 'roundedRect', 'triangle', '
 const STRAP_KINDS: PlateShapeKind[] = ['capsule', 'rect', 'roundedRect'];
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
-const PANEL_THICKNESS = 0.07;
+const PANEL_THICKNESS = 0.058;
 /** How far short of its neighbour a panel stops, so faces never touch. */
 const FACE_GAP = 0.07;
 /**
@@ -99,7 +99,14 @@ const SEAM_GAP = SCREW_SPACING - 2 * SCREW_EDGE_MARGIN + 0.02;
  * the same machine density) every shell stays nearly full size, which is what
  * makes a 140-190 screw level fit inside a sphere of radius 3 at all.
  */
-const SHELL_STEP = 0.13;
+const SHELL_STEP = 0.115;
+/**
+ * The skin sits a little further out than the point that maximises its own
+ * panels: pushing it out costs the skin some size but opens up the corner and
+ * edge voids where the brackets and straps live, and measured over the whole
+ * sweep that trade is worth about 15% more screws.
+ */
+const OUTER_REACH = 1.15;
 /** Screw lattice: columns one pitch apart, rows in hexagonal offset. */
 const SCREW_PITCH = SCREW_SPACING * 1.015;
 const SCREW_ROW = SCREW_PITCH * 0.874;
@@ -221,7 +228,7 @@ export function outerOffset(faceGap: number): number {
 export function shellRadii(shells: number, faceGap = Math.PI / 2): number[] {
   // Shallow assemblies are also SMALLER assemblies: a two-shell crust at the
   // full radius would be a big hollow eggshell.
-  const outer = Math.min(outerOffset(faceGap), 0.72 + 0.27 * shells);
+  const outer = Math.min(outerOffset(faceGap) * OUTER_REACH, 0.72 + 0.27 * shells);
   const out: number[] = [];
   for (let i = 0; i < shells; i++) out.push(Math.max(0.26, outer - SHELL_STEP * i));
   return out;
@@ -343,7 +350,7 @@ function makePanel(
   return {
     id,
     shape: fittedShape(kind, hw, hh, rng),
-    thickness: PANEL_THICKNESS * rng.float(0.85, 1.15),
+    thickness: PANEL_THICKNESS * rng.float(0.85, 1.1),
     position: scaleV3(dir, offset),
     rotation: quatFromFrame(normal, tangent),
     color,
@@ -369,14 +376,14 @@ function faceFrame(dirs: readonly Vec3[], i: number): { x: Vec3; y: Vec3 } {
 }
 
 /** How far out a family sits, as a multiple of the shell offset. */
-const FAMILY_REACH: Record<Family, number> = { face: 1, corner: 1.32, edge: 1.24 };
+const FAMILY_REACH: Record<Family, number> = { face: 1, corner: 1.45, edge: 1.35 };
 /** Biggest half-extent a bracket or strap may take, before the sphere and the OBB test. */
-const FAMILY_CAP: Record<Family, number> = { face: Infinity, corner: 0.95, edge: 1.45 };
+const FAMILY_CAP: Record<Family, number> = { face: Infinity, corner: 0.78, edge: 1.5 };
 /**
  * Brackets and straps are bolted ACROSS the joints between skin panels, so they
  * are allowed to bed into them a little; two skin panels are not.
  */
-const FAMILY_BITE: Record<Family, number> = { face: PANEL_GAP, corner: -0.05, edge: -0.05 };
+const FAMILY_BITE: Record<Family, number> = { face: PANEL_GAP, corner: -0.25, edge: -0.25 };
 
 /**
  * Build the chassis: mounting directions, and along each of them a stack of
@@ -389,122 +396,148 @@ export function placePanels(params: DifficultyParams, rng: Rng): PanelDef[] {
   const shells = Math.max(1, params.shells);
   const budget = Math.max(2, params.panels);
   const perShell = budget / shells;
-  const faces = Math.max(1, Math.min(6, Math.round(perShell)));
-  // Brackets and straps only once the six faces are paid for; they are what
-  // fills the corner and edge voids the faces cannot reach.
-  const extra = Math.max(0, Math.round(perShell) - 6);
-  const corners = Math.min(8, Math.round(extra * 0.55));
-  const edges = Math.min(12, extra - corners);
-  const mounts = mountingDirections(faces, corners, edges, rng);
+  // Six skin panels always: fewer than that and the player can turn the
+  // assembly to an angle with nothing facing them, which reads as a broken
+  // board rather than a puzzle. Brackets and straps come on top, and they are
+  // what fills the corner and edge voids the skin cannot reach.
+  const faces = 6;
+  const extra = Math.max(0, Math.round(perShell) - faces);
+  const mounts = mountingDirections(faces, extra > 0 ? 8 : 0, extra > 0 ? 12 : 0, rng);
   const dirs = mounts.map((m) => m.dir);
-  const gaps = neighbourAngles(dirs);
   const frames = dirs.map((_, i) => faceFrame(dirs, i));
-  const radii = shellRadii(shells, median(gaps.filter((_, i) => mounts[i].family === 'face')));
+  // The shell offsets are set by the SKIN's geometry — the brackets and straps
+  // hang off it. Measuring the gap over every mount would think the chassis was
+  // much finer than it is and pull the skin panels in to a third of their size.
+  const faceDirs = mounts.filter((m) => m.family === 'face').map((m) => m.dir);
+  const radii = shellRadii(shells, median(neighbourAngles(faceDirs)));
   const splitBias = Math.max(1, Math.min(2.6, budget / Math.max(1, mounts.length * shells)));
   const placed: Candidate[] = [];
+  const countByShell: number[] = [];
   let id = 0;
 
-  for (let shell = 0; shell < shells && id < budget; shell++) {
-    const isFrame = shells >= 4 && shell === shells - 1;
-    const base = radii[shell];
-    // The frame at the core: struts across it, at strong angles.
-    const offsets = mounts.map((m) => (isFrame ? Math.min(base, 0.62) : base * FAMILY_REACH[m.family]));
-    const palette = shell * 3;
-    for (const i of rng.shuffle(mounts.map((_, k) => k))) {
-      if (id >= budget) break;
-      const family = mounts[i].family;
-      // Openings: skip a few mounts. The outer skin keeps all of its panels
-      // (it is the level's front door), deeper shells are gappier.
-      if (shell > 0 && rng.chance(family === 'face' ? 0.1 : 0.18)) continue;
-      const t = offsets[i];
-      const frame = frames[i];
-      let sizes: { hw: number; hh: number; sites: number }[];
-      let kind: PlateShapeKind;
-      let normal = mounts[i].dir;
-      let split = 1;
-      let color: number;
-      let material: PanelDef['material'];
-      if (isFrame) {
-        const limit = Math.max(0.45, (shells > 1 ? radii[shells - 2] : 1.2) - 0.14);
-        const hw = Math.max(0.4, Math.min(1.05, Math.sqrt(Math.max(0.04, limit * limit - t * t)) * 0.85));
-        sizes = [{ hw, hh: Math.max(0.34, Math.min(hw * 0.5, limit * 0.4)), sites: 1 }];
-        kind = rng.pick(STRUT_KINDS);
-        normal = normalizeV3(quatRotate(
-          quatFromAxisAngle(normalizeV3(v3(rng.float(-1, 1), rng.float(-1, 1), rng.float(-1, 1))), rng.float(0, 0.45)),
-          mounts[i].dir,
-        ));
-        color = FRAME_COLOR;
-        material = 'metal';
-      } else {
-        const odd = shell >= 2 || family !== 'face';
-        const roomy = t > 1.1;
-        const aspect = family === 'edge' ? rng.float(0.42, 0.62)
-          : odd && roomy && rng.chance(0.3) ? rng.float(0.55, 0.8) : 1;
-        /*
-         * Skin panels are bounded analytically against the other skin panels —
-         * for an orthogonal chassis that bound is exact, so only a hair of
-         * slack is taken for the cases where the neighbour ends up smaller.
-         *
-         * Brackets and straps are NOT: they sit in the corner and edge voids
-         * that the skin cannot reach, and the plane-crossing bound is badly
-         * wrong for them (it stops a strap where it would cross a skin panel's
-         * infinite plane, ignoring that the panel itself ended long before).
-         * They are sized from the bounding sphere and cut back a column at a
-         * time by the OBB test, which uses the panels' real extents.
-         */
-        const exact = family === 'face'
-          ? faceRoom(dirs, offsets, i, frame.x, frame.y, aspect, 0, (j) => mounts[j].family === 'face')
-          : Math.min(FAMILY_CAP[family], sphereCap(t, aspect));
-        if (exact < 0.34) continue;
-        const cap = sphereCap(t, aspect);
-        const hwMax = Math.min(exact * 1.06, cap);
-        if (family === 'face') split = splitFor(hwMax, splitBias, rng);
-        sizes = candidateSizes(
-          (2 * hwMax - (split - 1) * SEAM_GAP) / (2 * split), hwMax * aspect, rng, odd,
-          family === 'face' ? 2 : 4,
-        );
-        if (sizes.length === 0) continue;
-        kind = family === 'edge' ? rng.pick(STRAP_KINDS)
-          : family === 'corner' ? rng.pick(BRACKET_KINDS)
-          : odd && rng.chance(0.3) ? rng.pick(FANCY_KINDS) : rng.pick(BULK_KINDS);
-        color = family === 'face' ? PANEL_COLORS[(palette + (id % 2)) % PANEL_COLORS.length] : BRACKET_COLOR;
-        material = family === 'face' ? rng.pick(MATERIALS) : 'metal';
-      }
-      // A panel that fouls a neighbour is retried a column or a row smaller
-      // before it is given up on, which packs the chassis far tighter than
-      // plain dart-throwing and keeps the panel budget reachable.
-      const seed = rng.int(0, 0x7fffffff);
-      const spin = rng.chance(0.5) ? quatFromAxisAngle(mounts[i].dir, Math.PI / 2) : undefined;
-      // Plates are cut down in their local X (that is the extent `split` divides
-      // up), so they must be shifted apart along that same axis.
-      const tangent = spin ? quatRotate(spin, frame.x) : frame.x;
-      const group: Candidate[] = [];
-      for (const size of sizes) {
-        group.length = 0;
-        const pitch = 2 * size.hw + SEAM_GAP;
-        for (let k = 0; k < split; k++) {
-          const shift = (k - (split - 1) / 2) * pitch;
-          const cand = makePanel(
-            id + k, shell, mounts[i].dir, tangent, normal, t, size.hw, size.hh, kind, color, material, new Rng(seed + k),
+  /*
+   * The skin goes on first, every shell of it, and only then the brackets and
+   * straps. The order matters: fittings sit in the corner and edge voids and
+   * would otherwise stand in the way of the next shell's skin panels, which are
+   * what actually carry the level's screws.
+   */
+  for (const pass of ['face', 'extra'] as const) {
+    for (let shell = 0; shell < shells && id < budget; shell++) {
+      const isFrame = shells >= 4 && shell === shells - 1;
+      const base = radii[shell];
+      // The frame at the core: struts across it, at strong angles.
+      const offsets = mounts.map((m) => (isFrame ? Math.min(base, 0.62) : base * FAMILY_REACH[m.family]));
+      const palette = shell * 3;
+      // Each shell gets its share of the panel budget: skin first (it carries
+      // the screws), then as many fittings as there is room for. Which ones
+      // differ per shell, so no two shells are the same box.
+      // There are only six skin mounts, so anything a shell is given beyond six
+      // panels goes to brackets and straps automatically — and those are the
+      // only panels whose faces point anywhere other than the six chassis axes,
+      // which is what keeps something tappable whichever way the assembly is
+      // turned.
+      const quota = Math.max(1, Math.round(perShell));
+      const wanted = rng.shuffle(mounts.map((_, k) => k).filter((k) => (
+        pass === 'face' ? mounts[k].family === 'face' : mounts[k].family !== 'face'
+      )));
+      let onShell = countByShell[shell] ?? 0;
+      for (const i of wanted) {
+        if (id >= budget || onShell >= quota) break;
+        const family = mounts[i].family;
+        // Openings: skip a few mounts. The outer skin keeps all of its panels
+        // (it is the level's front door), deeper shells are gappier.
+        if (shell > 0 && rng.chance(family === 'face' ? 0.1 : 0.18)) continue;
+        const t = offsets[i];
+        const frame = frames[i];
+        let sizes: { hw: number; hh: number; sites: number }[];
+        let kind: PlateShapeKind;
+        let normal = mounts[i].dir;
+        let split = 1;
+        let color: number;
+        let material: PanelDef['material'];
+        if (isFrame) {
+          const limit = Math.max(0.45, (shells > 1 ? radii[shells - 2] : 1.2) - 0.14);
+          const hw = Math.max(0.4, Math.min(1.05, Math.sqrt(Math.max(0.04, limit * limit - t * t)) * 0.85));
+          sizes = [{ hw, hh: Math.max(0.34, Math.min(hw * 0.5, limit * 0.4)), sites: 1 }];
+          kind = rng.pick(STRUT_KINDS);
+          normal = normalizeV3(quatRotate(
+            quatFromAxisAngle(normalizeV3(v3(rng.float(-1, 1), rng.float(-1, 1), rng.float(-1, 1))), rng.float(0, 0.45)),
+            mounts[i].dir,
+          ));
+          color = FRAME_COLOR;
+          material = 'metal';
+        } else {
+          const odd = shell >= 2 || family !== 'face';
+          const roomy = t > 1.1;
+          const aspect = family === 'edge' ? rng.float(0.26, 0.42)
+            : odd && roomy && rng.chance(0.3) ? rng.float(0.55, 0.8) : 1;
+          /*
+           * Skin panels are bounded analytically against the other skin panels —
+           * for an orthogonal chassis that bound is exact, so only a hair of
+           * slack is taken for the cases where the neighbour ends up smaller.
+           *
+           * Brackets and straps are NOT: they sit over the corner and edge
+           * joints, where the plane-crossing bound is badly wrong (it stops a
+           * strap where it would cross a skin panel's infinite plane, ignoring
+           * that the panel itself ended long before). They are sized from the
+           * bounding sphere and cut back a column at a time by the OBB test,
+           * which uses the panels' real extents.
+           */
+          const exact = family !== 'face' ? Math.min(FAMILY_CAP[family], sphereCap(t, aspect))
+            : faceRoom(dirs, offsets, i, frame.x, frame.y, aspect, 0, (j) => mounts[j].family === 'face');
+          if (exact < 0.34) continue;
+          const cap = sphereCap(t, aspect);
+          const hwMax = Math.min(exact * 1.06, cap);
+          if (family === 'face') split = splitFor(hwMax, splitBias, rng);
+          sizes = candidateSizes(
+            (2 * hwMax - (split - 1) * SEAM_GAP) / (2 * split), hwMax * aspect, rng, odd,
+            family === 'face' ? 2 : 4,
           );
-          cand.position = addV3(cand.position, scaleV3(tangent, shift));
-          if (panelMaxRadius(cand) > MAX_RADIUS) break;
-          const cobb = panelObb(cand);
-          const bite = FAMILY_BITE[family];
-          if (placed.some((c) => obbOverlap(c.obb, cobb, Math.max(bite, FAMILY_BITE[c.family])))) break;
-          // A panel with no room for a screw could never be unbolted.
-          if (latticePoints(cand, new Rng(seed + k)).length === 0) break;
-          group.push({ panel: cand, obb: cobb, family });
+          if (sizes.length === 0) continue;
+          kind = family === 'edge' ? rng.pick(STRAP_KINDS)
+            : family === 'corner' ? rng.pick(BRACKET_KINDS)
+            : odd && rng.chance(0.3) ? rng.pick(FANCY_KINDS) : rng.pick(BULK_KINDS);
+          color = family === 'face' ? PANEL_COLORS[(palette + (id % 2)) % PANEL_COLORS.length] : BRACKET_COLOR;
+          material = family === 'face' ? rng.pick(MATERIALS) : 'metal';
         }
-        if (group.length === split) break;
+        // A panel that fouls a neighbour is retried a column or a row smaller
+        // before it is given up on, which packs the chassis far tighter than
+        // plain dart-throwing and keeps the panel budget reachable.
+        const seed = rng.int(0, 0x7fffffff);
+        const spin = rng.chance(0.5) ? quatFromAxisAngle(mounts[i].dir, Math.PI / 2) : undefined;
+        // Plates are cut down in their local X (that is the extent `split`
+        // divides up), so they must be shifted apart along that same axis.
+        const tangent = spin ? quatRotate(spin, frame.x) : frame.x;
+        const group: Candidate[] = [];
+        for (const size of sizes) {
+          group.length = 0;
+          const pitch = 2 * size.hw + SEAM_GAP;
+          for (let k = 0; k < split; k++) {
+            const shift = (k - (split - 1) / 2) * pitch;
+            const cand = makePanel(
+              id + k, shell, mounts[i].dir, tangent, normal, t, size.hw, size.hh, kind, color, material, new Rng(seed + k),
+            );
+            cand.position = addV3(cand.position, scaleV3(tangent, shift));
+            if (panelMaxRadius(cand) > MAX_RADIUS) break;
+            const cobb = panelObb(cand);
+            const bite = FAMILY_BITE[family];
+            if (placed.some((c) => obbOverlap(c.obb, cobb, Math.min(bite, FAMILY_BITE[c.family])))) break;
+            // A panel with no room for a screw could never be unbolted.
+            if (latticePoints(cand, new Rng(seed + k)).length === 0) break;
+            group.push({ panel: cand, obb: cobb, family });
+          }
+          if (group.length === split) break;
+        }
+        // A plate that will not fit is simply left off — the rest of the face
+        // still gets bolted on, and the hole is another way in.
+        if (group.length === 0) continue;
+        for (const c of group) {
+          placed.push(c);
+          id++;
+          onShell++;
+        }
       }
-      // A plate that will not fit is simply left off — the rest of the face
-      // still gets bolted on, and the hole is another way in.
-      if (group.length === 0) continue;
-      for (const c of group) {
-        placed.push(c);
-        id++;
-      }
+      countByShell[shell] = onShell;
     }
   }
   return placed.map((c) => c.panel);
@@ -561,15 +594,26 @@ function edgeDistance(panel: PanelDef, p: Vec2): number {
   return best;
 }
 
+/** A candidate screw site on a panel: a local point on the front or back face. */
+interface Site { p: Vec2; back: boolean }
+
 interface PanelScrews {
-  candidates: Vec2[];
-  /** How many candidates have been tried (successful or not). */
+  sites: Site[];
+  /** How many sites have been tried (successful or not). */
   next: number;
   taken: number;
 }
 
 /**
- * Seat screws on the panels' outer faces, pointing along the outward normal.
+ * Seat screws on the panels' faces, pointing along the face's outward normal.
+ *
+ * Panels carry screws on BOTH faces. A back-face screw withdraws INTO the
+ * assembly, so it is only ever placed where that path is clear of everything
+ * deeper than its own panel — near the rim of a panel, where the shells inside
+ * it have already narrowed, or across the hollow core towards a panel on the
+ * far side that comes off earlier. It is a large part of where the working
+ * surface for a 190-screw level on a 3-unit sphere comes from, and it gives the
+ * player something to find on the inside faces once the skin is off.
  *
  * Every panel gets its FIRST screw before any panel gets a second: a panel with
  * no screws could never be unbolted and would block whatever is behind it for
@@ -582,13 +626,27 @@ export function placeScrews(panels: readonly PanelDef[], target: number, rng: Rn
   const index = new ScrewIndex3();
   const screws: ScrewSpot[] = [];
   const blockers: number[][] = [];
-  const state: PanelScrews[] = panels.map((p) => ({ candidates: rng.shuffle(latticePoints(p, rng)), next: 0, taken: 0 }));
+  const state: PanelScrews[] = panels.map((p) => ({
+    sites: [
+      ...rng.shuffle(latticePoints(p, rng)).map((q) => ({ p: q, back: false })),
+      // The outer skin keeps its screws on the OUTSIDE. A screw on the back of
+      // a skin panel points into the machine: the player would have to find it
+      // through a gap, and on a one-shell tutorial it would be the only thing
+      // on the panel and invisible from outside it.
+      ...(p.shell === 0 ? [] : rng.shuffle(latticePoints(p, rng)).map((q) => ({ p: q, back: true }))),
+    ],
+    next: 0,
+    taken: 0,
+  }));
   const cap = Math.max(target + 12, Math.round(target * 1.3));
 
-  const tryPlace = (pi: number, p: Vec2): boolean => {
+  const tryPlace = (pi: number, site: Site): boolean => {
     const panel = panels[pi];
-    const position = panelFacePoint(panel, p);
-    const axis = panelNormal(panel);
+    const normal = panelNormal(panel);
+    const position = site.back
+      ? panelToAssembly(panel, { x: site.p.x, y: site.p.y, z: 0 })
+      : panelFacePoint(panel, site.p);
+    const axis = site.back ? scaleV3(normal, -1) : normal;
     const spot: ScrewSpot = { panelId: panel.id, position, axis };
     const hit = bvh.query(rayOriginFor(spot), axis, RAY_LENGTH, pi);
     // Structural invariant: only strictly outer shells may block a screw.
@@ -604,19 +662,29 @@ export function placeScrews(panels: readonly PanelDef[], target: number, rng: Rn
   // Round 1: one screw each, so no panel is left unscrewable.
   for (const pi of rng.shuffle(panels.map((_, i) => i))) {
     const st = state[pi];
-    while (st.taken === 0 && st.next < st.candidates.length) {
-      if (tryPlace(pi, st.candidates[st.next++])) st.taken++;
+    while (st.taken === 0 && st.next < st.sites.length) {
+      if (tryPlace(pi, st.sites[st.next++])) st.taken++;
     }
   }
-  // Round 2: fill up, deepest shells first (they are the scarce ones). Each
-  // panel's candidates are consumed once — a site that was refused cannot
-  // become free later, since screws are only ever added.
+  /*
+   * Round 2 onwards: ONE screw per panel per pass, deepest shells first.
+   * Round-robin rather than filling each panel in turn, because a level where
+   * three panels carry seven screws and three carry one is a level with three
+   * viewing directions that have almost nothing on them — and `trimScrews`
+   * cannot repair that later, it only takes screws off the fullest panels.
+   * Each panel's sites are consumed once: a site that was refused cannot become
+   * free later, since screws are only ever added.
+   */
   const byDepth = panels.map((_, i) => i).sort((a, b) => panels[b].shell - panels[a].shell);
-  for (const pi of byDepth) {
-    if (screws.length >= cap) break;
-    const st = state[pi];
-    while (st.next < st.candidates.length && screws.length < cap) {
-      if (tryPlace(pi, st.candidates[st.next++])) st.taken++;
+  let progress = true;
+  while (progress && screws.length < cap) {
+    progress = false;
+    for (const pi of byDepth) {
+      if (screws.length >= cap) break;
+      const st = state[pi];
+      while (st.next < st.sites.length) {
+        if (tryPlace(pi, st.sites[st.next++])) { st.taken++; progress = true; break; }
+      }
     }
   }
   return { screws, blockers };
@@ -672,9 +740,23 @@ export function buildAssembly(params: DifficultyParams, rng: Rng): Assembly {
   if (built.length < 2) return { panels: [], screws: [], blockers: [] };
   const { screws, blockers } = placeScrews(built, params.screws, rng);
   const used = new Set(screws.map((s) => s.panelId));
-  if (used.size === built.length) return { panels: built, screws, blockers };
-  const panels = built.filter((p) => used.has(p.id));
-  return { panels, screws, blockers: blockers.map((b) => b.filter((id) => used.has(id))) };
+  const panels = compactShells(used.size === built.length ? built : built.filter((p) => used.has(p.id)));
+  return {
+    panels,
+    screws,
+    blockers: used.size === built.length ? blockers : blockers.map((b) => b.filter((id) => used.has(id))),
+  };
+}
+
+/**
+ * Renumber shells so they are a dense 0..n-1, keeping their order. A shell that
+ * lost all of its panels must not leave a hole: `shell` is what the renderer
+ * tints by, and the blocking order only cares about relative depth.
+ */
+function compactShells(panels: readonly PanelDef[]): PanelDef[] {
+  const used = [...new Set(panels.map((p) => p.shell))].sort((a, b) => a - b);
+  const rank = new Map(used.map((s, i) => [s, i]));
+  return panels.map((p) => (rank.get(p.shell) === p.shell ? p : { ...p, shell: rank.get(p.shell)! }));
 }
 
 /** Fraction of screws sitting on the outermost shell (kept honest by §7). */

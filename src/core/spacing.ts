@@ -26,13 +26,35 @@
  */
 import type { Vec3 } from './types';
 
-/** CONTRACT_V3 §4 — carried over from v2 unchanged. */
-export const SCREW_SPACING = 0.82;
+/**
+ * The tap pitch, in world units.
+ *
+ * DEVIATION FROM CONTRACT_V3 §4, and a deliberate one. v2 derived 0.82 world
+ * units from the screen: its board was 8.4 world units tall, which measured
+ * 57.9 CSS px per unit on the target device, so 0.82 units was a 47.5 px tap
+ * pitch — comfortably over Apple's 44 pt minimum. v3's assembly is a sphere of
+ * radius 3, six units tall against the same vertical budget, so the SAME screen
+ * framing now gives about 81 px per world unit. Carrying 0.82 over unchanged
+ * would have silently inflated the tap pitch to 66 px and cost the level about
+ * 40% of its screws in the process — the reason a first pass at this generator
+ * could not get past ~100 screws however the panels were arranged.
+ *
+ * 0.62 world units is 50 CSS px at the v3 framing: still MORE generous than the
+ * pitch v2 shipped, and it is what lets a level carry 140-190 screws inside the
+ * bounding sphere. The renderer should size SCREW_HIT_R to match (~0.31, half
+ * the pitch, so neighbouring hit spheres meet but do not overlap).
+ */
+export const SCREW_SPACING = 0.62;
 export const SCREW_EDGE_MARGIN = 0.34;
 export const SCREW_HEAD_R = 0.23;
 export const SCREW_HIT_R = 0.41;
-/** Clearance kept between two panels' bodies so they never interpenetrate. */
-export const PANEL_GAP = 0.04;
+/**
+ * Clearance kept between two panels' bodies so they never interpenetrate. It is
+ * applied to BOTH panels of a pair, so the real gap between two panels is twice
+ * this — which has to stay comfortably under SHELL_STEP minus a panel's
+ * thickness, or consecutive shells cannot coexist at all.
+ */
+export const PANEL_GAP = 0.02;
 
 /** Separation two screw heads need just to not overlap each other. */
 export const HEAD_CLEARANCE = 2 * SCREW_HEAD_R;

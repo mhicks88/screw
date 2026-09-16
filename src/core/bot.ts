@@ -36,6 +36,11 @@ export interface BotResult {
   picks?: number[];
   /** With `trace`: distinct colours among the simultaneously active boxes. */
   boxColorsPerStep?: number[];
+  /**
+   * With `trace`: the removable screw ids at a handful of sampled steps, used
+   * for the per-view-direction coverage check (CONTRACT_V3 §6).
+   */
+  reachSamples?: number[][];
 }
 
 export interface BotOptions {
@@ -61,9 +66,11 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
   const frontsPerStep: number[] | undefined = opts.trace ? [] : undefined;
   const picks: number[] | undefined = opts.trace ? [] : undefined;
   const boxColorsPerStep: number[] | undefined = opts.trace ? [] : undefined;
+  const reachSamples: number[][] | undefined = opts.trace ? [] : undefined;
+  const SAMPLE_EVERY = 12;
   const finish = (outcome: BotResult['outcome']): BotResult => ({
     outcome, steps, trayUses, peakTray,
-    ...(opts.trace ? { reachPerStep, frontsPerStep, picks, boxColorsPerStep } : {}),
+    ...(opts.trace ? { reachPerStep, frontsPerStep, picks, boxColorsPerStep, reachSamples } : {}),
   });
   const level = game.level;
   const panelById = new Map(level.panels.map((p) => [p.id, p]));
@@ -84,6 +91,7 @@ export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotRes
       for (const id of reachable) fronts.add(byId.get(id)!.panelId);
       frontsPerStep.push(fronts.size);
       boxColorsPerStep.push(new Set(boxes.map((b) => b.color)).size);
+      if (reachSamples && steps % SAMPLE_EVERY === 0 && reachSamples.length < 10) reachSamples.push([...reachable]);
     }
     const boxRoom = new Map<ScrewColor, number>();
     for (const b of boxes) if (b.screws.length < BOX_CAPACITY) boxRoom.set(b.color, Math.max(boxRoom.get(b.color) ?? -1, b.screws.length));

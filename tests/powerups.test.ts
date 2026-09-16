@@ -2,20 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { Game } from '../src/core/game';
 import { playBot } from '../src/core/bot';
 import { generateLevel } from '../src/core/generator';
-import { BASE, COVER, makeLevel, row, screw } from './helpers';
+import { BASE, COVER, makeLevel, row, screw, shift } from './helpers';
 import { BOX_CAPACITY, type GameEvent } from '../src/core/types';
 
 const types = (ev: GameEvent[]) => ev.map((e) => e.type);
 
 const nineLevel = (queue: ('red' | 'blue' | 'green')[], activeBoxCount: number) => makeLevel({
-  plates: [BASE],
+  panels: [BASE],
   screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 1, 3), ...row(6, 'green', -1, 3)],
   boxQueue: queue, activeBoxCount,
 });
 
 describe('drill', () => {
   const level = makeLevel({
-    plates: [BASE, COVER],
+    panels: [BASE, COVER],
     screws: [screw(0, 0, 1.5, 1.5, 'red', true), screw(1, 1, 1.8, 1.8, 'blue'), screw(2, 0, -1.5, -1.5, 'green'), screw(3, 0, -1.5, 0.5, 'red'), screw(4, 0, -1.5, 2, 'red')],
     boxQueue: ['red', 'blue'], activeBoxCount: 2,
   });
@@ -32,12 +32,12 @@ describe('drill', () => {
     expect(g.usePowerUp('drill').reason).toBe('noSuchScrew');
     expect(g.usePowerUp('drill', 77).reason).toBe('noSuchScrew');
   });
-  it('drops the plate when it drills the last screw of a plate', () => {
+  it('drops the panel when it drills the last screw of a panel', () => {
     const g = new Game(level);
-    expect(types(g.usePowerUp('drill', 1).events)).toEqual(['screwToBox', 'plateDrop', 'screwsUnblocked', 'screwRevealed']);
+    expect(types(g.usePowerUp('drill', 1).events)).toEqual(['screwToBox', 'panelDrop', 'screwsUnblocked', 'screwRevealed']);
   });
   it('refuses without losing when there is no room', () => {
-    const l = makeLevel({ plates: [BASE], screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 1, 3), ...row(6, 'blue', -1, 3)], boxQueue: ['red', 'blue', 'blue'], activeBoxCount: 1 });
+    const l = makeLevel({ panels: [BASE], screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 1, 3), ...row(6, 'blue', -1, 3)], boxQueue: ['red', 'blue', 'blue'], activeBoxCount: 1 });
     const g = new Game(l);
     for (const id of [3, 4, 5, 6, 7]) g.tapScrew(id);
     const r = g.usePowerUp('drill', 8);
@@ -84,13 +84,13 @@ describe('addBox', () => {
     g.tapScrew(0); g.tapScrew(1);
     expect(types(g.tapScrew(2).events)).toEqual(['screwToBox', 'boxComplete', 'boxSpawn', 'screwToBox']);
     g.tapScrew(4);
-    expect(types(g.tapScrew(5).events)).toEqual(['screwToBox', 'boxComplete', 'plateDrop', 'win']);
+    expect(types(g.tapScrew(5).events)).toEqual(['screwToBox', 'boxComplete', 'panelDrop', 'win']);
   });
   it('is refused when nothing is queued or the box row is full', () => {
-    const g = new Game(makeLevel({ plates: [BASE], screws: row(0, 'red', 3, 3), boxQueue: ['red'], activeBoxCount: 1 }));
+    const g = new Game(makeLevel({ panels: [BASE], screws: row(0, 'red', 3, 3), boxQueue: ['red'], activeBoxCount: 1 }));
     expect(g.usePowerUp('addBox').reason).toBe('nothingToDo');
     const full = new Game(makeLevel({
-      plates: [BASE], screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 2, 3), ...row(6, 'green', 1, 3), ...row(9, 'yellow', 0, 3), ...row(12, 'red', -1, 3)],
+      panels: [BASE], screws: [...row(0, 'red', 3, 3), ...row(3, 'blue', 2, 3), ...row(6, 'green', 1, 3), ...row(9, 'yellow', 0, 3), ...row(12, 'red', -1, 3)],
       boxQueue: ['red', 'blue', 'green', 'yellow', 'red'], activeBoxCount: 4,
     }));
     expect(full.usePowerUp('addBox').reason).toBe('maxBoxes');
@@ -122,7 +122,7 @@ describe('recolor', () => {
     const g = new Game(nineLevel(['red', 'blue', 'green'], 2));
     g.tapScrew(0); g.tapScrew(3);
     expect(g.usePowerUp('recolor').reason).toBe('noEmptyBox');
-    const g2 = new Game(makeLevel({ plates: [BASE], screws: row(0, 'red', 3, 3), boxQueue: ['red'], activeBoxCount: 1 }));
+    const g2 = new Game(makeLevel({ panels: [BASE], screws: row(0, 'red', 3, 3), boxQueue: ['red'], activeBoxCount: 1 }));
     expect(g2.usePowerUp('recolor').reason).toBe('nothingToDo');
   });
 });
@@ -141,8 +141,8 @@ describe('magnet', () => {
   });
   it('does nothing when no reachable screw matches', () => {
     const level = makeLevel({
-      plates: [BASE, COVER],
-      screws: [screw(0, 0, 1, 1, 'red'), screw(1, 0, 2, 1, 'red'), screw(2, 0, 1, 2, 'red'), ...row(3, 'blue', 2, 3, 1).map((s) => ({ ...s, x: s.x + 3 }))],
+      panels: [BASE, COVER],
+      screws: [screw(0, 0, 1, 1, 'red'), screw(1, 0, 2, 1, 'red'), screw(2, 0, 1, 2, 'red'), ...row(3, 'blue', 2, 3, 1).map((s) => shift(s, 3, 0))],
       boxQueue: ['red', 'blue'], activeBoxCount: 1,
     });
     const g = new Game(level);

@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   pointInPolygon, pointInShape, polygonsOverlap, polygonDistance, transformPolygon, inverseTransformPoint,
-  plateContainsWorldPoint, plateWorldOutline, plateEdgeDistance, isCCW, polygonArea, shapeArea, segmentsIntersect,
+  isCCW, polygonArea, shapeArea, segmentsIntersect,
 } from '../src/core/geometry';
 import { makeShape, SHAPE_KINDS, ringShape, convexHull } from '../src/core/shapes';
 import { Rng } from '../src/core/rng';
-import { rectPlate } from './helpers';
 
 const square = [{ x: -1, y: -1 }, { x: 1, y: -1 }, { x: 1, y: 1 }, { x: -1, y: 1 }];
 
@@ -44,16 +43,6 @@ describe('geometry', () => {
       expect(back.x).toBeCloseTo(square[i].x, 9);
       expect(back.y).toBeCloseTo(square[i].y, 9);
     }
-  });
-  it('plate containment and edge distance in world space', () => {
-    const plate = rectPlate(0, 0, 1, 1, 2, 1, Math.PI / 2); // rotated: extends 1 in x, 2 in y around (1,1)
-    expect(plateContainsWorldPoint(plate, 1, 2.5)).toBe(true);
-    expect(plateContainsWorldPoint(plate, 2.5, 1)).toBe(false);
-    expect(plateEdgeDistance(plate, 1, 1)).toBeCloseTo(1, 9);
-    const outline = plateWorldOutline(plate);
-    expect(outline).toHaveLength(4);
-    expect(isCCW(outline)).toBe(true);
-    expect(polygonArea(outline)).toBeCloseTo(8, 9);
   });
   it('every shape kind produces a CCW outline with positive area', () => {
     const rng = new Rng(42);
