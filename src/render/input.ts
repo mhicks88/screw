@@ -18,6 +18,15 @@ export interface InputOptions {
 }
 
 const DRAG_CANCEL_PX = 12;
+/**
+ * How far off a screw a tap may land and still count, in CSS px. Deep levels
+ * put adjacent tap targets ~26 px apart, well under the 44 px a fingertip
+ * covers, so without this a slightly-off tap does nothing at all. Kept below
+ * half the tightest observed gap so it cannot reach past a nearer neighbour.
+ */
+const NEAR_MISS_PX = 13;
+/** Two targets within this many px of the touch count as tied on distance. */
+const NEAR_MISS_TIE_PX = 3;
 
 /**
  * Pointer handling for the canvas.
@@ -35,6 +44,7 @@ const DRAG_CANCEL_PX = 12;
 export class InputHandler {
   private readonly raycaster = new THREE.Raycaster();
   private readonly ndc = new THREE.Vector2();
+  private readonly scratch = new THREE.Vector3();
   private active: {
     pointerId: number;
     startX: number;
@@ -89,14 +99,56 @@ export class InputHandler {
     if (rect.width === 0 || rect.height === 0) return null;
     this.ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.ndc, this.opts.camera);
-    const hits = this.raycaster.intersectObjects(this.opts.hitTargets(), false);
-    if (hits.length === 0) return null;
-    // Nearest to the camera wins: on a solid, the screw in front is the one the
-    // player can see and therefore the one they meant.
-    let best = hits[0];
-    for (let i = 1; i < hits.length; i++) if (hits[i].distance < best.distance) best = hits[i];
-    const id = best.object.userData.screwId;
-    return typeof id === 'number' ? id : null;
+    const targets = this.opts.hitTargets();
+    const hits = this.raycaster.intersectObjects(targets, false);
+    if (hits.length > 0) {
+      // Nearest to the camera wins: on a solid, the screw in front is the one the
+      // player can see and therefore the one they meant.
+      let best = hits[0];
+      for (let i = 1; i < hits.length; i++) if (hits[i].distance < best.distance) best = hits[i];
+      const id = best.object.userData.screwId;
+      return typeof id === 'number' ? id : null;
+    }
+    return this.pickNearMiss(clientX, clientY, rect, targets);
+  }
+
+  /**
+   * Forgive a near miss. On deep levels adjacent tap targets sit ~26 CSS px
+   * apart on screen, so a fingertip that lands just off a screw hits nothing
+   * and the tap is silently lost. When the ray misses everything, fall back to
+   * the closest target within NEAR_MISS_PX of the touch point, preferring the
+   * one nearest the camera when two are within a few pixels of each other.
+   * This never overrides a direct hit, so it cannot make a confident tap land
+   * on the wrong screw — it only rescues taps that would otherwise do nothing.
+   */
+  private pickNearMiss(
+    clientX: number,
+    clientY: number,
+    rect: DOMRect,
+    targets: THREE.Object3D[],
+  ): number | null {
+    const cam = this.opts.camera;
+    let bestId: number | null = null;
+    let bestPx = NEAR_MISS_PX;
+    let bestDepth = Infinity;
+    for (const t of targets) {
+      const id = t.userData.screwId;
+      if (typeof id !== 'number') continue;
+      t.getWorldPosition(this.scratch);
+      const depth = this.scratch.distanceTo(cam.position);
+      this.scratch.project(cam);
+      const x = rect.left + ((this.scratch.x + 1) / 2) * rect.width;
+      const y = rect.top + ((1 - this.scratch.y) / 2) * rect.height;
+      const px = Math.hypot(x - clientX, y - clientY);
+      if (px > bestPx + NEAR_MISS_TIE_PX) continue;
+      // Within a tie band, the screw closer to the camera is the visible one.
+      if (px < bestPx - NEAR_MISS_TIE_PX || depth < bestDepth) {
+        bestId = id;
+        bestPx = Math.min(bestPx, px);
+        bestDepth = depth;
+      }
+    }
+    return bestId;
   }
 
   private pointerDown(e: PointerEvent): void {

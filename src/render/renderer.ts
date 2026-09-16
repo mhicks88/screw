@@ -104,7 +104,8 @@ export class GameRenderer {
   private readonly field: ScrewField;
   private readonly world: World;
   private readonly player: EventPlayer;
-  private readonly input: InputHandler;
+  /** Private in spirit; the dev harness and integration checks reach for it. */
+  readonly input: InputHandler;
   private readonly orbit: Orbit;
   private readonly affordance: RotateAffordance;
   private lastFrameMs = 0;
