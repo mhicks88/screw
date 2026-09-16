@@ -362,7 +362,7 @@ function attemptBudget(params: DifficultyParams): number {
  * CONTRACT_V3 §7. Bigger assemblies cost more per attempt, so they get fewer.
  */
 function maxTotalAttempts(params: DifficultyParams): number {
-  return params.screws >= 140 ? 60 : params.screws >= 100 ? 78 : params.screws >= 60 ? 110 : 150;
+  return params.screws >= 140 ? 70 : params.screws >= 100 ? 92 : params.screws >= 60 ? 130 : 180;
 }
 
 const KEEP = 5;
