@@ -1,0 +1,117 @@
+/**
+ * Bot used to prove levels are winnable (and to gauge difficulty):
+ *   1. if a reachable screw matches an active box with room, take it (prefer the
+ *      fullest box);
+ *   2. otherwise, if the tray has room, park a reachable screw there. The choice
+ *      is human-like but greedy: prefer screws whose plate is nearly empty
+ *      (dropping it unblocks things), especially when that plate covers screws
+ *      of an active box colour, and prefer colours already accumulating in the
+ *      tray (a lazily spawned box of that colour then chains them out). A dose
+ *      of randomness keeps play-throughs varied;
+ *   3. otherwise it loses.
+ * No lookahead on purpose: tray pressure is what makes a level hard, and the
+ * generator's lazy box queue is the only thing that rescues the bot.
+ *
+ * Deterministic for a given seed and level, so replaying with the recorded
+ * queue reproduces the exact same play-through.
+ */
+import { BOX_CAPACITY, type ScrewColor } from './types';
+import { Rng } from './rng';
+import type { Game } from './game';
+
+export interface BotResult {
+  outcome: 'won' | 'lost' | 'stuck';
+  steps: number;
+  /** Number of screws the bot had to park in the tray. */
+  trayUses: number;
+  /** Maximum simultaneous tray occupancy. */
+  peakTray: number;
+}
+
+export interface BotOptions {
+  /**
+   * Naive mode: matching screws are picked at random (not fullest box first)
+   * and tray choices are uniformly random. Used to estimate how forgiving a
+   * level is for a player who does not plan.
+   */
+  naive?: boolean;
+  maxSteps?: number;
+}
+
+export function playBot(game: Game, seed: number, opts: BotOptions = {}): BotResult {
+  const rng = new Rng(seed);
+  const naive = opts.naive === true;
+  const maxSteps = opts.maxSteps ?? 5000;
+  let steps = 0;
+  let trayUses = 0;
+  let peakTray = 0;
+  const level = game.level;
+  const plateById = new Map(level.plates.map((p) => [p.id, p]));
+  const coverMap = game.coverageMap();
+
+  while (steps < maxSteps) {
+    if (game.getStatus() !== 'playing') break;
+    const reachable = game.reachableScrewIds();
+    if (reachable.length === 0) return { outcome: 'stuck', steps, trayUses, peakTray };
+    const screws = game.peekScrews();
+    const byId = new Map(screws.map((s) => [s.id, s]));
+    const boxes = game.peekBoxes();
+    const boxRoom = new Map<ScrewColor, number>();
+    for (const b of boxes) if (b.screws.length < BOX_CAPACITY) boxRoom.set(b.color, Math.max(boxRoom.get(b.color) ?? -1, b.screws.length));
+
+    // 1. Matching screw → fullest box.
+    let pick = -1;
+    let bestFill = -1;
+    for (const id of reachable) {
+      const fill = boxRoom.get(byId.get(id)!.color) ?? -1;
+      if (fill < 0) continue;
+      if (naive) { if (pick < 0 || rng.chance(0.5)) pick = id; continue; }
+      if (fill > bestFill || (fill === bestFill && rng.chance(0.5))) { pick = id; bestFill = fill; }
+    }
+    if (pick < 0) {
+      // 2. Tray.
+      const tray = game.peekTray();
+      if (!tray.includes(null)) {
+        game.tapScrew(reachable[0]); // refused with trayFull → status 'lost'
+        return { outcome: 'lost', steps, trayUses, peakTray };
+      }
+      if (naive) {
+        pick = rng.pick(reachable);
+        trayUses++;
+      } else {
+      const trayCount = new Map<ScrewColor, number>();
+      const remaining = new Map<ScrewColor, number>();
+      for (const s of screws) {
+        if (s.location === 'tray') trayCount.set(s.color, (trayCount.get(s.color) ?? 0) + 1);
+        if (s.location === 'tray' || s.location === 'plate') remaining.set(s.color, (remaining.get(s.color) ?? 0) + 1);
+      }
+      const plates = new Map(game.peekPlates().map((p) => [p.id, p]));
+      let bestScore = -Infinity;
+      for (const id of reachable) {
+        const s = byId.get(id)!;
+        const plate = plates.get(s.plateId)!;
+        const left = plate.remainingScrews.length;
+        // Screws of an active colour that this plate is currently hiding.
+        let hiddenActive = 0;
+        for (const cid of coverMap.get(s.plateId) ?? []) {
+          const c = byId.get(cid)!;
+          if (c.location === 'plate' && boxRoom.has(c.color)) hiddenActive++;
+        }
+        const layer = plateById.get(s.plateId)!.layer;
+        let score = 3 / left + (hiddenActive * 2.5) / left + (trayCount.get(s.color) ?? 0) * 1.2;
+        score += (remaining.get(s.color) ?? 0) * 0.15 + layer * 0.2;
+        score += rng.float(0, 2);
+        if (score > bestScore) { bestScore = score; pick = id; }
+      }
+      trayUses++;
+      }
+    }
+    const r = game.tapScrew(pick);
+    steps++;
+    if (!r.ok) return { outcome: game.getStatus() === 'lost' ? 'lost' : 'stuck', steps, trayUses, peakTray };
+    const occ = game.peekTray().filter((x) => x !== null).length;
+    if (occ > peakTray) peakTray = occ;
+  }
+  const st = game.getStatus();
+  return { outcome: st === 'won' ? 'won' : st === 'lost' ? 'lost' : 'stuck', steps, trayUses, peakTray };
+}
