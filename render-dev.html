@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <link rel="icon" href="data:," />
+    <title>Renderer dev harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0f1326; overflow: hidden; overscroll-behavior: none; }
+      body { font: 13px system-ui, -apple-system, sans-serif; color: #dfe6ff; -webkit-user-select: none; user-select: none; }
+      #app { position: fixed; inset: 0; }
+      #app canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+      #top, #bottom { position: fixed; left: 0; right: 0; display: flex; gap: 6px; align-items: center; padding: 8px 10px; background: rgba(10, 12, 24, 0.75); backdrop-filter: blur(6px); z-index: 2; }
+      #top { top: 0; padding-top: calc(8px + env(safe-area-inset-top)); }
+      #bottom { bottom: 0; flex-wrap: wrap; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+      button { font: inherit; color: #fff; background: #2a3470; border: 0; border-radius: 8px; padding: 8px 10px; min-height: 36px; }
+      #status { flex: 1; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div id="top">
+      <button id="btn-restart">Restart</button>
+      <span id="status">loading…</span>
+      <button id="btn-next">Next</button>
+    </div>
+    <div id="bottom">
+      <button id="btn-hint">Hint</button>
+      <button id="btn-target">Drill</button>
+      <button id="btn-slot">+Slot</button>
+      <button id="btn-box">+Box</button>
+      <button id="btn-recolor">Recolor</button>
+    </div>
+    <script type="module" src="/src/render/devHarness.ts"></script>
+  </body>
+</html>
