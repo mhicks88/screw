@@ -356,6 +356,15 @@ function attemptBudget(params: DifficultyParams): number {
   return params.screws >= 140 ? 45 : params.screws >= 100 ? 60 : params.screws >= 60 ? 80 : 110;
 }
 
+/**
+ * Hard ceiling on attempts including the extra round below, sized so even a
+ * level that never satisfies every criterion stays inside the ~2 s budget of
+ * CONTRACT_V3 §7. Bigger assemblies cost more per attempt, so they get fewer.
+ */
+function maxTotalAttempts(params: DifficultyParams): number {
+  return params.screws >= 140 ? 60 : params.screws >= 100 ? 78 : params.screws >= 60 ? 110 : 150;
+}
+
 const KEEP = 5;
 
 interface Candidate { def: LevelDef; stats: LevelStats; score: number; attempt: number }
@@ -436,8 +445,12 @@ export function generateLevel(level: number): LevelDef {
    * timing, and the stubborn ones get the attempts they actually need.
    */
   if (!tier1.length && !tier2.length) {
-    const extra = Math.round(budget * 1.5);
-    for (let attempt = budget; attempt < budget + extra; attempt++) {
+    // Bounded by a TOTAL attempt cap, not by adding a multiple of the budget.
+    // An unbounded second round made the levels that cannot be satisfied pay
+    // the most for nothing: two levels ran the whole extra round, still missed
+    // the floor, and took 3.0 s against a 2 s budget. The cap keeps the worst
+    // case inside the budget while still buying most of the improvement.
+    for (let attempt = budget; attempt < maxTotalAttempts(params); attempt++) {
       tryAttempt(attempt);
       if (tier1.length) break;
     }
