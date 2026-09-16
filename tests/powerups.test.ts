@@ -128,17 +128,55 @@ describe('recolor', () => {
 });
 
 describe('magnet', () => {
-  it('pulls every matching reachable screw, handling completions and spawns in between', () => {
+  it('fills the boxes on screen and stops, rather than chaining through refills', () => {
+    // Two active boxes with three spaces each: the magnet takes exactly six and
+    // leaves the rest. It used to loop until nothing matched, which chained
+    // through every refill and cleared whole levels from one tap.
     const g = new Game(nineLevel(['red', 'blue', 'green'], 2));
     const r = g.usePowerUp('magnet');
     expect(r.ok).toBe(true);
     const t = types(r.events);
-    expect(t.filter((x) => x === 'screwToBox')).toHaveLength(9);
-    expect(t.filter((x) => x === 'boxComplete')).toHaveLength(3);
-    expect(t.filter((x) => x === 'boxSpawn')).toHaveLength(1);
-    expect(t.at(-1)).toBe('win');
-    expect(g.usePowerUp('magnet').reason).toBe('notPlaying');
+    expect(t.filter((x) => x === 'screwToBox')).toHaveLength(2 * BOX_CAPACITY);
+    expect(t.filter((x) => x === 'boxComplete')).toHaveLength(2);
+    expect(t).not.toContain('win');
+    const s = g.snapshot();
+    expect(s.status).toBe('playing');
+    expect(s.removedScrews).toBe(6);
+    // The replacement boxes make a second pull possible, so it is not a one-shot.
+    expect(g.usePowerUp('magnet').ok).toBe(true);
   });
+
+  it('never clears more than the visible box capacity on a real level', () => {
+    for (const n of [60, 350, 700, 1000]) {
+      const g = new Game(generateLevel(n));
+      const before = g.snapshot();
+      g.usePowerUp('magnet');
+      const pulled = g.snapshot().removedScrews - before.removedScrews;
+      expect(pulled).toBeGreaterThan(0);
+      expect(pulled).toBeLessThanOrEqual(before.boxes.length * BOX_CAPACITY);
+      // The whole point: one tap must not finish the level.
+      expect(g.snapshot().status).toBe('playing');
+    }
+  }, 60_000);
+
+  it('never pushes a screw into the tray, so it cannot lose the game', () => {
+    const g = new Game(generateLevel(350));
+    // Fill the tray by hand with screws that match nothing on screen.
+    for (let i = 0; i < 40 && g.snapshot().tray.some((x) => x === null); i++) {
+      const s = g.snapshot();
+      const boxed = new Set(s.boxes.map((b) => b.color));
+      const byId = new Map(s.screws.map((x) => [x.id, x]));
+      const id = g.reachableScrewIds().find((x) => !boxed.has(byId.get(x)!.color));
+      if (id === undefined) break;
+      g.tapScrew(id);
+    }
+    const trayBefore = g.snapshot().tray.filter(Boolean).length;
+    const r = g.usePowerUp('magnet');
+    const after = g.snapshot();
+    expect(after.status).not.toBe('lost');
+    expect(after.tray.filter(Boolean).length).toBeLessThanOrEqual(trayBefore);
+    expect(types(r.events)).not.toContain('lose');
+  }, 60_000);
   it('does nothing when no reachable screw matches', () => {
     const level = makeLevel({
       panels: [BASE, COVER],
