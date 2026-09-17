@@ -10,8 +10,10 @@ import { distanceToPolygonEdge, pointInShape } from '../src/core/geometry';
 import { assemblyToPanel, dotV3, lengthV3, panelMaxRadius, panelNormal } from '../src/core/geometry3';
 import { SCREW_EDGE_MARGIN, spacingViolations } from '../src/core/spacing';
 import {
-  ASSEMBLY_RADIUS, BOX_CAPACITY, MAX_ACTIVE_BOXES, MAX_BONUS_SLOTS, BASE_TRAY_SLOTS, type LevelDef,
+  ALL_COLORS, ASSEMBLY_RADIUS, BOX_CAPACITY, MAX_ACTIVE_BOXES, MAX_BONUS_SLOTS, BASE_TRAY_SLOTS, type LevelDef,
 } from '../src/core/types';
+import { playBot } from '../src/core/bot';
+import { hashSeed } from '../src/core/rng';
 
 const EPS = 1e-6;
 
@@ -20,20 +22,26 @@ const EPS = 1e-6;
  * every band boundary, and a spread in between). `npm run sweep` verifies all
  * 1000 — generating a level costs up to two seconds by design.
  */
-const BAND_EDGES = [1, 2, 3, 4, 5, 30, 31, 32, 120, 121, 122, 350, 351, 352, 700, 701, 702, 999, 1000];
+const BAND_EDGES = [1, 2, 3, 4, 5, 6, 30, 31, 32, 120, 121, 122, 350, 351, 352, 700, 701, 702, 999, 1000];
 export const SAMPLE_LEVELS = [...new Set([
   ...BAND_EDGES,
   ...[10, 25, 60, 100, 200, 300, 450, 500, 600, 800, 900],
 ])].sort((a, b) => a - b);
 
-/** CONTRACT_V3 §7 band table, as published (panels raised to a floor of 6 — see difficulty.ts). */
+/**
+ * CONTRACT_V3 §7 band table, as published (panels raised to a floor of 6 — see
+ * difficulty.ts), with the 4-30 band split at the point where the assembly
+ * gains its second shell, and with the colour ramp §7 does not publish.
+ * Both halves of 4-30 stay inside its published screw/shell/panel ranges.
+ */
 const BANDS = [
   { lo: 1, hi: 3, screws: [9, 12], shells: [1, 1], panels: [6, 6], colors: [3, 3] },
-  { lo: 4, hi: 30, screws: [12, 30], shells: [1, 2], panels: [6, 10], colors: [3, 4] },
-  { lo: 31, hi: 120, screws: [30, 60], shells: [2, 3], panels: [10, 20], colors: [4, 6] },
-  { lo: 121, hi: 350, screws: [60, 100], shells: [3, 4], panels: [18, 32], colors: [5, 7] },
-  { lo: 351, hi: 700, screws: [100, 140], shells: [4, 5], panels: [28, 45], colors: [6, 8] },
-  { lo: 701, hi: 1000, screws: [140, 190], shells: [5, 6], panels: [40, 60], colors: [6, 8] },
+  { lo: 4, hi: 4, screws: [12, 15], shells: [1, 1], panels: [6, 7], colors: [4, 4] },
+  { lo: 5, hi: 30, screws: [15, 30], shells: [2, 2], panels: [8, 10], colors: [6, 8] },
+  { lo: 31, hi: 120, screws: [30, 60], shells: [2, 3], panels: [10, 20], colors: [8, 8] },
+  { lo: 121, hi: 350, screws: [60, 100], shells: [3, 4], panels: [18, 32], colors: [8, 8] },
+  { lo: 351, hi: 700, screws: [100, 140], shells: [4, 5], panels: [28, 45], colors: [8, 8] },
+  { lo: 701, hi: 1000, screws: [140, 190], shells: [5, 6], panels: [40, 60], colors: [8, 8] },
 ];
 const bandFor = (n: number) => BANDS.find((b) => n <= b.hi)!;
 
@@ -103,7 +111,7 @@ function checkConstraints(def: LevelDef, n: number): void {
     }
     if (s.hidden) expect(blockers[i].length, `${tag} mystery screw ${i} is not blocked at start`).toBeGreaterThan(0);
   });
-  if (n < 25) expect(def.screws.some((s) => s.hidden), tag).toBe(false);
+  if (n < 15) expect(def.screws.some((s) => s.hidden), tag).toBe(false);
 }
 
 describe('generator', () => {
@@ -135,10 +143,19 @@ describe('generator', () => {
     expect(difficultyLabelFor(50)).toBe('extreme');
     expect(difficultyLabelFor(34)).toBe('easy');
     expect(difficultyLabelFor(7)).toBe('normal');
-    expect(difficultyFor(24).mysteryFraction).toBe(0);
-    expect(difficultyFor(25).mysteryFraction).toBeGreaterThan(0);
+    expect(difficultyFor(14).mysteryFraction).toBe(0);
+    expect(difficultyFor(15).mysteryFraction).toBeGreaterThan(0);
     expect(difficultyFor(500).screws).toBeGreaterThan(difficultyFor(100).screws);
-    expect(difficultyFor(500).colors).toBeGreaterThan(difficultyFor(50).colors);
+    // Colours against open boxes is the pressure, so colours ramp fast and then
+    // stay at the full palette rather than being saved for the deep end.
+    expect(difficultyFor(5).colors).toBeLessThan(difficultyFor(25).colors);
+    expect(difficultyFor(25).colors).toBe(ALL_COLORS.length);
+    expect(difficultyFor(1000).colors).toBe(ALL_COLORS.length);
+    // Two open boxes is the pressure default, and the "Magic Box" power-up
+    // needs a free box position to spawn into on every level that can be lost.
+    for (let n = 4; n <= TOTAL_LEVELS; n++) {
+      expect(difficultyFor(n).activeBoxCount, `level ${n} boxes`).toBeLessThan(MAX_ACTIVE_BOXES);
+    }
     expect(difficultyFor(1000).screws).toBeGreaterThanOrEqual(180);
     expect(difficultyFor(1000).shells).toBe(6);
     for (let n = 1; n <= TOTAL_LEVELS; n++) {
@@ -270,6 +287,78 @@ describe('generator', () => {
       const s = measureLevel(def);
       expect(s.startBoxColors, `level ${n} startBoxColors`).toBe(want);
       expect(s.avgBoxColors, `level ${n} avgBoxColors`).toBeGreaterThanOrEqual(Math.min(want, 2) * 0.8);
+    }
+  }, 300_000);
+
+  /*
+   * THE DIFFICULTY CURVE (CONTRACT_V3 §7's "how forgiving is this level").
+   *
+   * Measured with the same proxy the generator gates on: a naive bot — random
+   * matching, random tray choices — replays the level's own recorded queue
+   * twelve times from seeded starts. Twelve of twelve means the level plays
+   * itself; zero means a player who does not plan does not finish it.
+   *
+   * The ceilings below never rise, which is the property that broke before: v3.0
+   * peaked around level 40 (8/12) and got EASIER with depth, reaching 11/12 at
+   * level 1000, because the tray and the box count grew faster than everything
+   * else and the gate was switched off for exactly those levels. Because a later
+   * ceiling is never higher than an earlier one, this table is what stops the
+   * curve from silently flattening again.
+   */
+  const GATE_RUNS = 12;
+  function naiveWins(def: LevelDef): number {
+    let wins = 0;
+    for (let k = 0; k < GATE_RUNS; k++) {
+      if (playBot(new Game(def), hashSeed(def.seed, k + 1), { naive: true }).outcome === 'won') wins++;
+    }
+    return wins;
+  }
+
+  /** [level, most naive wins allowed] — non-increasing, one win of tolerance on the target curve. */
+  const CURVE_CEILING: [number, number][] = [
+    [1, 12], [2, 12], [3, 12], // tutorials: they teach the drag-to-rotate gesture
+    [5, 11], [10, 8], [20, 5], [30, 4], [50, 3], [100, 2], [300, 1], [700, 1], [1000, 1],
+  ];
+
+  it('gets hard fast and never gets easier again', () => {
+    const measured = CURVE_CEILING.map(([n]) => naiveWins(level(n)));
+    const table = CURVE_CEILING.map(([n], i) => `L${n}: ${measured[i]}/${GATE_RUNS}`).join('  ');
+    console.log(`naive-bot win rate — ${table}`);
+
+    CURVE_CEILING.forEach(([n, max], i) => {
+      expect(measured[i], `level ${n} is too forgiving (${measured[i]}/${GATE_RUNS}, ceiling ${max})`)
+        .toBeLessThanOrEqual(max);
+    });
+    // The ceilings themselves must never rise, or the assertion above would
+    // permit the deep end to drift back to being the easy part of the game.
+    for (let i = 1; i < CURVE_CEILING.length; i++) {
+      expect(CURVE_CEILING[i][1], `ceiling rises at level ${CURVE_CEILING[i][0]}`)
+        .toBeLessThanOrEqual(CURVE_CEILING[i - 1][1]);
+    }
+
+    // Levels 1-3 are the only teaching the rotation gesture gets: they must
+    // still play themselves.
+    for (const n of [1, 2, 3]) {
+      expect(naiveWins(level(n)), `tutorial level ${n} is not trivial`).toBe(GATE_RUNS);
+    }
+
+    // And the same numbers read as a sequence, on levels picked to share the
+    // rhythm's shape (no 'easy' breathers, one per depth): flat or downhill.
+    const RUN = [5, 10, 20, 30, 50, 100, 300, 700, 1000];
+    const runWins = RUN.map((n) => naiveWins(level(n)));
+    for (let i = 1; i < RUN.length; i++) {
+      expect(runWins[i], `level ${RUN[i]} (${runWins[i]}/${GATE_RUNS}) is easier than level ${RUN[i - 1]} (${runWins[i - 1]}/${GATE_RUNS})`)
+        .toBeLessThanOrEqual(runWins[i - 1]);
+    }
+  }, 300_000);
+
+  it('keeps the tray from growing into the difficulty', () => {
+    // The tray is the dominant forgiveness — it is the only place a level can
+    // be lost — so it stays at its base size for the whole game, and the player
+    // buys extra slots with the "Extra Hole" power-up instead of being given
+    // them. Growing it with depth is what flattened the old curve.
+    for (const n of SAMPLE_LEVELS) {
+      expect(level(n).traySlots, `level ${n} tray`).toBe(BASE_TRAY_SLOTS);
     }
   }, 300_000);
 

@@ -12,9 +12,12 @@
  * edges, panels not interpenetrating), the blocking order that makes a level
  * solvable by construction, the §7 non-linearity statistics (including that the
  * simultaneously active boxes open on distinct colours), the §6 rule that some
- * screws are removable and face-on from EVERY viewing direction, and winnability
- * by replaying the proven winning line through the public Game API. Prints
- * per-band statistics and timings at the end.
+ * screws are removable and face-on from EVERY viewing direction, winnability by
+ * replaying the proven winning line through the public Game API, and the
+ * DIFFICULTY CURVE — the share of GATE_RUNS seeded replays that a naive bot
+ * (random matching, random tray choices) wins. Prints per-band statistics and
+ * timings at the end, and fails if a deeper band is more forgiving than the one
+ * before it.
  */
 import { build } from 'esbuild';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -45,8 +48,18 @@ const {
   generateLevel, measureLevel, lastGenerationStats, nonLinearityTargets, difficultyFor, minViewFacing,
   winningMoves, computeBlockers, spacingViolations, shellCount, outerShellFraction,
   assemblyToPanel, panelMaxRadius, panelNormal, panelObb, obbOverlap, dotV3, lengthV3,
-  pointInShape, distanceToPolygonEdge, Game,
+  pointInShape, distanceToPolygonEdge, Game, playBot, hashSeed,
 } = core;
+
+/** Same proxy the generator gates on: 12 seeded replays by a bot that does not plan. */
+const GATE_RUNS = 12;
+function naiveWins(def) {
+  let wins = 0;
+  for (let k = 0; k < GATE_RUNS; k++) {
+    if (playBot(new Game(def), hashSeed(def.seed, k + 1), { naive: true }).outcome === 'won') wins++;
+  }
+  return wins;
+}
 
 const from = Number(arg('from', 1));
 const to = Number(arg('to', TOTAL_LEVELS));
@@ -173,7 +186,7 @@ for (let n = from; n <= to; n += every) {
   const meets = stats.avgReachable >= t.avgReachable && stats.minReachable >= t.minReachable
     && stats.avgFronts >= t.avgFronts && stats.maxChokeRun < 4 && stats.startBoxColors >= t.startBoxColors
     && stats.minViewFacing >= t.minViewFacing;
-  rows.push({ n, def, stats, ms, meets, opening, params: difficultyFor(n) });
+  rows.push({ n, def, stats, ms, meets, opening, naive: naiveWins(def), params: difficultyFor(n) });
   if (!quiet && (every > 1 || n % 25 === 0)) {
     process.stdout.write(`\r  level ${n}  (${rows.length} done, ${((Date.now() - t0) / 1000).toFixed(0)}s)   `);
   }
@@ -181,7 +194,7 @@ for (let n = from; n <= to; n += every) {
 if (!quiet) process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
 const fmt = (v, w, d = 1) => (typeof v === 'number' ? v.toFixed(d) : String(v)).padStart(w);
-const head = ['band', 'levels', 'screws', 'shells', 'panels', 'outer%', 'avgReach', 'avgFront', 'minReach', 'peak', 'minView', 'boxCols', 'choke>3', '§7 ok', 'gen ms'];
+const head = ['band', 'levels', 'screws', 'shells', 'panels', 'outer%', 'avgReach', 'avgFront', 'minReach', 'peak', 'minView', 'boxCols', 'choke>3', '§7 ok', 'naive/12', 'gen ms'];
 console.log('\n' + head.map((h, i) => h.padStart(i === 0 ? 10 : 9)).join(''));
 
 for (let b = 0; b < BANDS.length; b++) {
@@ -204,6 +217,7 @@ for (let b = 0; b < BANDS.length; b++) {
     `${Math.min(...rs.map((r) => r.stats.startBoxColors))}/${fmt(agg((r) => r.stats.avgBoxColors), 1, 1).trim()}`.padStart(9),
     String(rs.filter((r) => r.stats.maxChokeRun >= 4).length).padStart(9),
     `${Math.round((rs.filter((r) => r.meets).length / rs.length) * 100)}%`.padStart(9),
+    `${fmt(agg((r) => r.naive), 1, 1).trim()}/${Math.max(...rs.map((r) => r.naive))}`.padStart(9),
     fmt(agg((r) => r.ms), 9, 0),
   ].join(''));
 }
@@ -223,6 +237,22 @@ console.log(`maxima         : ${maxScrews} screws, ${maxShells} shells, ${maxPan
 console.log(`outer shell    : worst ${(worstOuter.stats.outerShellFraction * 100).toFixed(1)}% of screws on the skin at level ${worstOuter.n}`);
 console.log(`view coverage  : worst ${worstView.stats.minViewFacing} tappable from the least helpful angle (level ${worstView.n}); every level opens with at least ${Math.min(...rows.map((r) => r.opening))}`);
 console.log(`§7 compliance  : ${rows.filter((r) => r.meets).length}/${rows.length} levels meet every non-linearity criterion`);
+{
+  // The curve must not turn back up: past the tutorials, each successive band's
+  // mean naive-win rate has to be no higher than the one before it.
+  const means = BANDS.map(([, hi], b) => {
+    const rs = rows.filter((r) => bandOf(r.n) === b);
+    return rs.length ? rs.reduce((a, r) => a + r.naive, 0) / rs.length : null;
+  });
+  console.log(`difficulty     : mean naive wins per band ${means.map((m) => (m === null ? '-' : m.toFixed(1))).join(' -> ')} (of ${GATE_RUNS})`);
+  for (let b = 2; b < means.length; b++) {
+    if (means[b] === null || means[b - 1] === null) continue;
+    check(means[b] <= means[b - 1] + 0.5,
+      `band ${BANDS[b][0]}-${BANDS[b][1]} is MORE forgiving than the band before it (${means[b].toFixed(1)} vs ${means[b - 1].toFixed(1)} naive wins)`);
+  }
+  const worst = rows.filter((r) => r.n > 100).reduce((a, r) => (r.naive > a.naive ? r : a), { naive: -1 });
+  if (worst.naive >= 0) console.log(`               : most forgiving level past 100 is ${worst.n} at ${worst.naive}/${GATE_RUNS}`);
+}
 console.log(`box colours    : every level opens with ${rows.every((r) => r.stats.startBoxColors >= Math.min(r.def.activeBoxCount, r.def.colors.length)) ? 'all-distinct' : 'DUPLICATE'} box colours`
   + ` (worst average over a play-through ${Math.min(...rows.map((r) => r.stats.avgBoxColors)).toFixed(2)})`);
 console.log(`wall clock     : ${((Date.now() - t0) / 1000).toFixed(1)}s`);

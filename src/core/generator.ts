@@ -6,12 +6,18 @@
  * recorded from a bot play-through with a lazy colour provider.
  *
  * Every candidate must be WINNABLE — the planning bot clears it with a lazily
- * chosen box queue — and is then judged on two axes: how it plays (the §7
+ * chosen box queue — and is then judged on three axes: how it plays (the §7
  * non-linearity statistics measured over that play-through, plus the §6 rule
- * that some screws are removable and face-on from every viewing direction) and
- * whether it is the size its band advertises. Candidates are tiered on those
- * two, play quality first, and the best of the highest non-empty tier that also
- * survives the "not too forgiving" naive-bot gate wins.
+ * that some screws are removable and face-on from every viewing direction),
+ * whether it is the size its band advertises, and HOW FORGIVING it is — how
+ * often a naive bot that does not plan clears it. Candidates are tiered on the
+ * first two, play quality first, and among the tiers that are sound the one
+ * whose best candidate comes closest to this level's difficulty window wins.
+ *
+ * That third axis is what v3.0 lacked. Its gate was switched off below level 30
+ * and switched off again for any level with four active boxes — the whole of the
+ * deepest band — so the game peaked in difficulty around level 40 and got easier
+ * with depth from there.
  *
  * Solvability is not left to luck: the assembly is built so that a screw can
  * only ever be blocked by panels in a strictly outer shell (see ./assembly), so
@@ -187,11 +193,22 @@ export function nonLinearityTargets(level: number): NonLinearityTargets {
   const params = difficultyFor(level);
   // Every starting box must want a different colour whenever the palette allows.
   const startBoxColors = Math.min(params.activeBoxCount, params.colors);
-  // Turning the assembly must never show an empty board: whatever angle the
-  // player lands on, some screws are face-on and removable.
-  // Small assemblies have less material to present at once; big ones must
-  // always offer a real choice whichever way they are turned.
-  const viewFloor = level <= 350 ? 2 : 3;
+  /*
+   * Turning the assembly must never show an empty board: whatever angle the
+   * player lands on, some screws are face-on and removable. Above that bare
+   * rule — VIEW_FLOOR_MIN, which no level may break — this is what the generator
+   * PREFERS: a real choice from every angle, not just a move.
+   *
+   * It is set by the assembly's size, not by level number: how many screws can
+   * face the player at once is a question about how much material there is. The
+   * old rule asked three of everything past level 350, which is where the bands
+   * carry 100-140 screws; with two open boxes rather than three, more of those
+   * screws are sitting in the tray at any moment, and three was no longer
+   * reachable there — the generator spent its whole budget failing to find one
+   * and shipped a candidate at one instead. Three is kept for the 140+ band,
+   * which does have the material for it.
+   */
+  const viewFloor = params.screws >= 140 ? 3 : 2;
   if (level <= 5) return { avgReachable: 0, minReachable: 1, avgFronts: 0, maxChokeRun: 999, minViewFacing: viewFloor, startBoxColors };
   const s = Math.min(1, (level - 5) / 45);
   return {
@@ -266,6 +283,16 @@ export function winningMoves(def: LevelDef): number[] {
   return playBot(new Game(def), def.seed, { trace: true }).picks ?? [];
 }
 
+/**
+ * The §6 rule itself: SOME screw is removable and face-on from every viewing
+ * direction, at every sampled moment. `NonLinearityTargets.minViewFacing` asks
+ * for more than that — a real choice, not just a move — and is a preference the
+ * generator pays for in `quality` and gates on in its top tiers. When a level
+ * cannot offer both that preference and the difficulty its depth calls for,
+ * this is the line that still holds.
+ */
+export const VIEW_FLOOR_MIN = 1;
+
 function meetsTargets(stats: LevelStats, targets: NonLinearityTargets): boolean {
   return stats.minViewFacing >= targets.minViewFacing
     && stats.avgReachable >= targets.avgReachable
@@ -277,34 +304,119 @@ function meetsTargets(stats: LevelStats, targets: NonLinearityTargets): boolean 
 
 /* ------------------------------------------------------- difficulty gate */
 
-function naiveRuns(screws: number): number { return screws > 110 ? 4 : screws > 45 ? 6 : 8; }
+/**
+ * Runs of the naive bot used to judge one candidate. Twelve is the resolution
+ * the difficulty curve below is written in, and the generator measures what it
+ * is aiming at rather than a cheaper approximation of it: picking the tightest
+ * of twenty candidates on a four-run estimate is the winner's curse — the
+ * candidate that happens to lose four seeded runs is often an ordinary level,
+ * and level 300 shipped at 5/12 while the gate believed it was 0/4.
+ */
+const GATE_RUNS = 12;
+
+/**
+ * The published difficulty curve: how many of GATE_RUNS a player who does not
+ * plan should win at this depth. Linear between the listed levels.
+ *
+ *   1-4     12/12   tutorials and the single-shell bridge; they teach the
+ *                   drag-to-rotate gesture and must play themselves
+ *   5       10/12   the tray exists and can bite
+ *   10       7/12   real pressure
+ *   20       4/12   demanding
+ *   30       3/12
+ *   50       2/12
+ *   100      1/12
+ *   200+     0/12   a level you do not plan is a level you lose
+ *
+ * v3.0's curve started at 0.85 of the runs and bottomed out at 0.5, switched
+ * the gate off entirely below level 30, and switched it off again for any level
+ * with four active boxes — which was the whole of the deepest band. The game
+ * peaked in difficulty around level 40 and got EASIER from there.
+ */
+const CURVE: [level: number, wins: number][] = [
+  [4, 12], [5, 10], [10, 7], [20, 4], [30, 3], [50, 2], [100, 1], [200, 0],
+];
+
+function naiveWinTarget(level: number): number {
+  if (level <= CURVE[0][0]) return CURVE[0][1];
+  for (let i = 1; i < CURVE.length; i++) {
+    const [hi, hiW] = CURVE[i];
+    if (level <= hi) {
+      const [lo, loW] = CURVE[i - 1];
+      return Math.round(loW + ((hiW - loW) * (level - lo)) / (hi - lo));
+    }
+  }
+  return CURVE[CURVE.length - 1][1];
+}
 
 /**
  * Difficulty gate. The planning bot proves the level is winnable; a naive bot
- * (random matching, random tray choices) then replays the FIXED queue several
- * times and its win count tells how forgiving the level is. Later levels (and
- * 'hard'/'extreme' ones) must be less forgiving, early ones must not be brutal.
- * Levels with the full four boxes are hard enough by construction, so they skip
- * the gate. The gate only ranks candidates — if none passes, the best is used
- * anyway, so generation always terminates.
+ * (random matching, random tray choices) then replays the FIXED queue GATE_RUNS
+ * times and its win count tells how forgiving the level is. The window has BOTH
+ * ends: a level of this depth must not be forgiving, and — while the player is
+ * still learning what the tray is for — must not be brutal either.
+ *
+ * The rhythm rides on top: a 'hard' or 'extreme' level is one win tighter than
+ * its depth asks for, an 'easy' breather one win looser. One win is deliberately
+ * small — the rhythm is already felt in the band position, which gives a 'hard'
+ * level more screws and more colours than its neighbours.
+ *
+ * The gate ranks candidates rather than rejecting outright (see `pickByGate`),
+ * so generation always terminates.
  */
 function naiveWinLimits(level: number, params: DifficultyParams): { max: number; min: number } {
-  const runs = naiveRuns(params.screws);
-  if (level <= 30 || params.activeBoxCount >= 4) return { max: runs, min: 0 };
-  let max = Math.round(runs * (level <= 60 ? 0.85 : level <= 150 ? 0.75 : level <= 400 ? 0.62 : 0.5));
-  if (params.label === 'hard') max -= 1;
-  else if (params.label === 'extreme') max -= 2;
-  max = Math.min(runs, Math.max(0, max));
-  const min = level < 200 ? 1 : 0;
+  if (level <= 4) return { max: GATE_RUNS, min: 0 };
+  const target = naiveWinTarget(level);
+  const mod = params.label === 'extreme' || params.label === 'hard' ? -1 : params.label === 'easy' ? 1 : 0;
+  const max = Math.min(GATE_RUNS, Math.max(0, target + mod));
+  // The window has a floor one win below the ceiling, not zero. Without it the
+  // gate takes the first candidate that is merely no easier than the target and
+  // ships whatever it finds: level 15, which wants six, came out at zero — a
+  // brick wall five levels after the game first asks the player to think.
+  const min = Math.max(0, max - 1);
   return { max, min };
 }
 
-function naiveWins(def: LevelDef, runs: number): number {
+function naiveWins(def: LevelDef): number {
   let wins = 0;
-  for (let k = 0; k < runs; k++) {
+  for (let k = 0; k < GATE_RUNS; k++) {
     if (playBot(new Game(def), hashSeed(def.seed, k + 1), { naive: true }).outcome === 'won') wins++;
   }
   return wins;
+}
+
+/**
+ * How far outside its difficulty window a candidate falls. Undershooting costs
+ * more than overshooting, and by enough to outrank a nearer miss on the easy
+ * side: a level that is a shade too forgiving is a better level than a wall.
+ * Level 30 wants one or two and had a 0 and a 4 to choose from; it shipped the 0.
+ */
+function gateMiss(wins: number, limits: { max: number; min: number }): number {
+  return Math.max(0, wins - limits.max) + 2.5 * Math.max(0, limits.min - wins);
+}
+
+/**
+ * Apply the gate to a tier of candidates (already ordered best-quality first).
+ * The first candidate INSIDE the window wins. When none is inside — the common
+ * case for a level the generator cannot make tight enough — the one that misses
+ * by the least wins, rather than v3.0's "take the highest-quality one and give
+ * up on difficulty". That is what stopped the deep bands from drifting back to
+ * levels the naive bot clears 11 times out of 12.
+ */
+function pickByGate(
+  list: readonly Candidate[],
+  limits: { max: number; min: number },
+  winsFor: (c: Candidate) => number,
+): { cand: Candidate; wins: number; miss: number } {
+  let best: { cand: Candidate; wins: number; miss: number } | undefined;
+  for (const cand of list) {
+    const wins = winsFor(cand);
+    const miss = gateMiss(wins, limits);
+    if (miss === 0) return { cand, wins, miss };
+    // Strictly less: ties keep the earlier, higher-quality candidate.
+    if (!best || miss < best.miss) best = { cand, wins, miss };
+  }
+  return best!;
 }
 
 /* ----------------------------------------------------------- generation */
@@ -353,7 +465,7 @@ function quality(stats: LevelStats, t: NonLinearityTargets, params: DifficultyPa
 
 /** Attempts per level; each costs an assembly plus one bot play-through. */
 function attemptBudget(params: DifficultyParams): number {
-  return params.screws >= 140 ? 45 : params.screws >= 100 ? 60 : params.screws >= 60 ? 80 : 110;
+  return params.screws >= 140 ? 38 : params.screws >= 100 ? 52 : params.screws >= 60 ? 80 : 110;
 }
 
 /**
@@ -362,10 +474,20 @@ function attemptBudget(params: DifficultyParams): number {
  * CONTRACT_V3 §7. Bigger assemblies cost more per attempt, so they get fewer.
  */
 function maxTotalAttempts(params: DifficultyParams): number {
-  return params.screws >= 140 ? 70 : params.screws >= 100 ? 92 : params.screws >= 60 ? 130 : 180;
+  return params.screws >= 140 ? 52 : params.screws >= 100 ? 70 : params.screws >= 60 ? 100 : 180;
 }
 
-const KEEP = 5;
+/**
+ * How many candidates per tier are carried to the difficulty gate. The gate can
+ * only choose from what it is shown, and the candidates a level offers are
+ * spread wide: at level 50 the naive bot wins anywhere from 2 to 12 of them.
+ * Five was too narrow a window to find the tight ones. Small levels are cheap
+ * to replay, so they keep the most; the biggest levels keep fewer, because at
+ * 140+ screws the replays start to cost real time against the ~2 s budget.
+ */
+function keepCount(params: DifficultyParams): number {
+  return params.screws >= 120 ? 10 : params.screws >= 60 ? 20 : 30;
+}
 
 interface Candidate { def: LevelDef; stats: LevelStats; score: number; attempt: number }
 
@@ -379,8 +501,9 @@ export function generateLevel(level: number): LevelDef {
   const budget = attemptBudget(params);
   /*
    * Tier 1: the right size AND every §7 criterion. Tier 2: every criterion, a
-   * little small. Tier 3: the right size but some criterion missed. Tier 4:
-   * anything winnable. The best candidate of the highest non-empty tier wins.
+   * little small. Tier 3: the right size and every criterion but the PREFERRED
+   * view floor, still clearing the §6 rule itself. Tier 4: the right size but
+   * some criterion missed. Tier 5: anything winnable.
    *
    * How a level PLAYS outranks how big it is — a level that is 8% short but
    * offers screws from every angle is a better level than a full-size one the
@@ -391,10 +514,13 @@ export function generateLevel(level: number): LevelDef {
   const tier2: Candidate[] = [];
   const tier3: Candidate[] = [];
   const tier4: Candidate[] = [];
+  const tier5: Candidate[] = [];
+  const tiers = [tier1, tier2, tier3, tier4, tier5];
+  const maxKeep = keepCount(params);
   const keep = (list: Candidate[], c: Candidate) => {
     list.push(c);
     list.sort((a, b) => b.score - a.score);
-    if (list.length > KEEP) list.length = KEEP;
+    if (list.length > maxKeep) list.length = maxKeep;
   };
 
   const tryAttempt = (attempt: number): void => {
@@ -433,18 +559,44 @@ export function generateLevel(level: number): LevelDef {
       && stats.shells >= params.shells - 1
       && stats.panels >= params.panels * 0.6;
     const plays = meetsTargets(stats, targets);
-    keep(rightSize ? (plays ? tier1 : tier3) : (plays && nearSize ? tier2 : tier4), c);
+    // Same level of play, one notch less view coverage than preferred — still
+    // never an empty angle. Worth more than a level at the wrong difficulty.
+    const playsSoftView = !plays && meetsTargets(stats, { ...targets, minViewFacing: VIEW_FLOOR_MIN });
+    keep(
+      rightSize
+        ? (plays ? tier1 : playsSoftView ? tier3 : tier4)
+        : (plays && nearSize ? tier2 : tier5),
+      c,
+    );
   };
 
   for (let attempt = 0; attempt < budget; attempt++) tryAttempt(attempt);
+
+  const limits = naiveWinLimits(level, params);
+  const winCache = new Map<Candidate, number>();
+  const winsFor = (c: Candidate): number => {
+    let w = winCache.get(c);
+    if (w === undefined) { w = naiveWins(c.def); winCache.set(c, w); }
+    return w;
+  };
+  const inWindow = (c: Candidate): boolean => { const w = winsFor(c); return w <= limits.max && w >= limits.min; };
+  /** Tiers whose levels meet §7 and §6 and may therefore be chosen on difficulty. */
+  const sound = [tier1, tier2, tier3];
   /*
-   * Nothing met every criterion inside the budget. Falling back here is what
-   * left ~12% of the 351-700 band reaching only two screws from some viewing
-   * angle against a floor of three — playable, but not what the band promises.
-   * Spend a second round ONLY on those levels: the common case keeps its
-   * timing, and the stubborn ones get the attempts they actually need.
+   * What the budget was supposed to buy: a candidate at the PREFERRED view
+   * coverage, and a sound candidate inside this level's difficulty window.
+   * Either half missing is worth more attempts.
+   *
+   * Missing the coverage is what left ~12% of the 351-700 band short of its
+   * floor. Missing the window is worse and more common: candidates that clear
+   * every §7 criterion are scarce around 90 screws — sometimes one in eighty —
+   * and one candidate is no choice at all, so whatever difficulty it happens to
+   * have is what ships. That is how level 200 came out at 7 naive wins sitting
+   * between a 0 at level 100 and a 3 at level 300.
    */
-  if (!tier1.length && !tier2.length) {
+  const satisfied = (): boolean =>
+    (tier1.length > 0 || tier2.length > 0) && sound.some((list) => list.some(inWindow));
+  if (!satisfied()) {
     // Bounded by a TOTAL attempt cap, not by adding a multiple of the budget.
     // An unbounded second round made the levels that cannot be satisfied pay
     // the most for nothing: two levels ran the whole extra round, still missed
@@ -452,29 +604,40 @@ export function generateLevel(level: number): LevelDef {
     // case inside the budget while still buying most of the improvement.
     for (let attempt = budget; attempt < maxTotalAttempts(params); attempt++) {
       tryAttempt(attempt);
-      if (tier1.length) break;
+      if (satisfied()) break;
     }
   }
 
   // Prefer a level that meets every criterion; fall back to the best seen.
-  for (const list of [tier1, tier2, tier3, tier4]) {
-    for (const c of list) {
-      const runs = naiveRuns(c.stats.screws);
-      const { max, min } = naiveWinLimits(level, params);
-      let wins = -1;
-      if (max < runs || min > 0) {
-        wins = naiveWins(c.def, runs);
-        if (wins > max || wins < min) continue;
-      }
-      lastStats = { ...c.stats, attempts: c.attempt + 1, naiveWins: wins, ms: Date.now() - t0 };
-      return c.def;
+  /*
+   * Choose among the tiers that are sound — every §7 criterion met, and §6 held
+   * at VIEW_FLOOR_MIN even where the preferred view floor was not reachable — on
+   * how close each one's best candidate comes to this level's difficulty window,
+   * plus one win per tier of descent. A level that meets §7 with one screw less
+   * coverage than preferred, at the difficulty its depth calls for, is a better
+   * level than a beautifully covered one the player clears without thinking;
+   * the per-tier penalty keeps it from trading coverage away for nothing.
+   *
+   * Below the sound tiers the old order stands: a level that misses a §7
+   * criterion outright is not rescued by being hard.
+   */
+  let chosen: { cand: Candidate; wins: number } | undefined;
+  let chosenCost = Infinity;
+  sound.forEach((list, depth) => {
+    if (!list.length) return;
+    const c = pickByGate(list, limits, winsFor);
+    const cost = c.miss + depth;
+    if (cost < chosenCost) { chosenCost = cost; chosen = c; }
+  });
+  if (!chosen) {
+    for (const list of [tier4, tier5]) {
+      if (list.length) { chosen = pickByGate(list, limits, winsFor); break; }
     }
-    // Nothing in this tier survived the difficulty gate: take its best anyway.
-    if (list.length) {
-      const c = list[0];
-      lastStats = { ...c.stats, attempts: c.attempt + 1, naiveWins: -1, ms: Date.now() - t0 };
-      return c.def;
-    }
+  }
+  if (chosen) {
+    const c: { cand: Candidate; wins: number } = chosen;
+    lastStats = { ...c.cand.stats, attempts: c.cand.attempt + 1, naiveWins: c.wins, ms: Date.now() - t0 };
+    return c.cand.def;
   }
   throw new Error(`generateLevel(${level}): could not produce a winnable level`);
 }
